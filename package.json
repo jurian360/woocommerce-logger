@@ -11,7 +11,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:ts && npm run test:php",
+    "test:ts": "node --experimental-strip-types --no-warnings tests/schema-format.ts",
+    "test:php": "php tests/plugin-unit.php"
   },
   "dependencies": {
     "mongoose": "^8.9.0",
