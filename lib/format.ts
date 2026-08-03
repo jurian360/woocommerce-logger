@@ -154,8 +154,23 @@ export function summarizeChanges(
   return lines;
 }
 
-/** Renders a timestamp in a fixed timezone so server output is deterministic. */
-export function formatTimestamp(date: Date | string | number | undefined): string {
+/**
+ * Renders a timestamp in an explicit timezone, so server output is
+ * deterministic — the container's own clock never enters into it.
+ *
+ * `timeZone` must be an identifier `Intl` accepts; callers pass
+ * `intlTimeZone(...)` from `lib/timezone.ts`, which is where the reader's
+ * choice is resolved and where `UTC-3` is translated to its IANA spelling
+ * (`Etc/GMT+3` — the sign really is inverted there). Anything `Intl` rejects
+ * falls back to UTC rather than throwing in the middle of a render.
+ *
+ * This module deliberately imports nothing at runtime: `tests/` loads it under
+ * `node --experimental-strip-types`, where the `@/` alias does not resolve.
+ */
+export function formatTimestamp(
+  date: Date | string | number | undefined,
+  timeZone = 'UTC'
+): string {
   if (!date) {
     return '—';
   }
@@ -165,11 +180,16 @@ export function formatTimestamp(date: Date | string | number | undefined): strin
     return '—';
   }
 
-  return new Intl.DateTimeFormat('en-GB', {
+  const options: Intl.DateTimeFormatOptions = {
     dateStyle: 'medium',
     timeStyle: 'medium',
-    timeZone: process.env.DASHBOARD_TIMEZONE || 'UTC',
-  }).format(value);
+  };
+
+  try {
+    return new Intl.DateTimeFormat('en-GB', { ...options, timeZone }).format(value);
+  } catch {
+    return new Intl.DateTimeFormat('en-GB', { ...options, timeZone: 'UTC' }).format(value);
+  }
 }
 
 /** "3 minutes ago" — cheap relative time without a date library. */

@@ -184,6 +184,12 @@ export interface LogQueryHref {
   page: number;
   /** The window a bare `/` already means; kept out of the query string. */
   defaultDays: number;
+  /** Display timezone. Not part of the query — it changes nothing about which
+   * entries match — but it travels with every link so choosing a zone survives
+   * filtering and paging. */
+  tz?: string;
+  /** What `DASHBOARD_TIMEZONE` already provides; kept out of the URL. */
+  defaultTz?: string;
 }
 
 /**
@@ -191,7 +197,14 @@ export interface LogQueryHref {
  * unfiltered first page is always just `/`, and so the filter bar and the
  * pagination links cannot drift apart — both call this.
  */
-export function logQueryHref({ days, sku, page, defaultDays }: LogQueryHref): string {
+export function logQueryHref({
+  days,
+  sku,
+  page,
+  defaultDays,
+  tz,
+  defaultTz,
+}: LogQueryHref): string {
   const params = new URLSearchParams();
 
   if (days !== defaultDays) {
@@ -205,6 +218,10 @@ export function logQueryHref({ days, sku, page, defaultDays }: LogQueryHref): st
 
   if (page > 1) {
     params.set('page', String(page));
+  }
+
+  if (tz !== undefined && tz !== '' && tz !== (defaultTz ?? '')) {
+    params.set('tz', tz);
   }
 
   const query = params.toString();

@@ -12,10 +12,20 @@ import {
   windowLabel,
   type LogFilter,
 } from '@/lib/log-query';
+import {
+  defaultTimeZone,
+  intlTimeZone,
+  parseTimeZone,
+  timeZoneLabel,
+  timeZoneOptions,
+} from '@/lib/timezone';
+import { authEnabled } from '@/lib/auth';
 import type { AuditLogRecord } from '@/types/audit';
 import FilterBar from './filter-bar';
+import LogoutButton from './logout-button';
 import Pagination from './pagination';
 import RefreshButton from './refresh-button';
+import TimezoneSelect from './timezone-select';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -165,6 +175,12 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
   const params = await searchParams;
   const retention = retentionDays();
   const defaultDays = defaultWindowDays(retention);
+
+  // Display only — the zone never touches the Mongo query, which is all in UTC.
+  const fallbackTimeZone = defaultTimeZone();
+  const timeZone = parseTimeZone(params.tz, fallbackTimeZone);
+  const formatZone = intlTimeZone(timeZone);
+
   const {
     filter,
     days,
@@ -208,7 +224,21 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
             .
           </p>
         </div>
-        <RefreshButton />
+        <div className="flex flex-wrap items-center gap-3">
+          <TimezoneSelect
+            timeZone={timeZone}
+            defaultTimeZone={fallbackTimeZone}
+            groups={timeZoneOptions(timeZone)}
+            days={days}
+            sku={sku}
+            // The clamped page, not the requested one: a display change should
+            // land on the page actually being read.
+            page={page}
+            defaultDays={defaultDays}
+          />
+          <RefreshButton />
+          {authEnabled() ? <LogoutButton /> : null}
+        </div>
       </header>
 
       <FilterBar
@@ -216,6 +246,8 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
         sku={sku}
         options={dayFilterOptions(retention)}
         defaultDays={defaultDays}
+        timeZone={timeZone}
+        defaultTimeZone={fallbackTimeZone}
       />
 
       {error ? (
@@ -298,7 +330,7 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
                   <td className="whitespace-nowrap px-4 py-3 text-sm">
                     <div className="flex flex-col gap-0.5">
                       <span className="text-slate-900 dark:text-slate-100">
-                        {formatTimestamp(log.timestamp)}
+                        {formatTimestamp(log.timestamp, formatZone)}
                       </span>
                       <span className="text-xs text-slate-500 dark:text-slate-400">
                         {formatRelative(log.timestamp)}
@@ -330,11 +362,13 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
           days={days}
           sku={sku}
           defaultDays={defaultDays}
+          timeZone={timeZone}
+          defaultTimeZone={fallbackTimeZone}
         />
       )}
 
       <p className="mt-6 text-xs text-slate-400 dark:text-slate-600">
-        Timestamps shown in {process.env.DASHBOARD_TIMEZONE || 'UTC'}. Entries are kept for{' '}
+        Timestamps shown in {timeZoneLabel(timeZone)}. Entries are kept for{' '}
         {windowLabel(retention)}; older ones are deleted by the daily cleanup job.
       </p>
     </main>

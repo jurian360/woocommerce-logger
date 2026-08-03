@@ -1,78 +1,75 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
+import {
+  SESSION_COOKIE,
+  dashboardPassword,
+  verifySessionToken,
+} from '@/lib/auth';
+
 /**
- * Optional HTTP Basic Auth for the dashboard.
+ * Gate for the dashboard.
  *
  * The audit log contains who changed what and when — it should not be world
- * readable. When `DASHBOARD_USER` and `DASHBOARD_PASSWORD` are both set, every
- * page request must authenticate. When either is empty the dashboard stays
- * open, which is fine for local development.
+ * readable. When `DASHBOARD_PASSWORD` is set, every page request must carry a
+ * valid session cookie, and anything else is sent to `/login`. When it is empty
+ * the dashboard stays open, which is fine for local development.
  *
- * The ingest route (`/api/*`) is excluded: it authenticates with the
- * `X-Api-Secret` header instead.
+ * The ingest and cleanup routes (`/api/*`) are excluded by the matcher: they
+ * authenticate with the `X-Api-Secret` header instead, and a redirect to an
+ * HTML login page would be a confusing answer to a machine.
+ *
+ * This runs on the Edge runtime, so the cookie is verified with Web Crypto via
+ * `lib/auth.ts` — `node:crypto` and `Buffer` are unavailable here.
  */
 
-/** Length-independent comparison to avoid leaking the password by timing. */
-function constantTimeEquals(a: string, b: string): boolean {
-  const length = Math.max(a.length, b.length);
-  let mismatch = a.length ^ b.length;
+/** The one path that must stay reachable while logged out. */
+const LOGIN_PATH = '/login';
 
-  for (let i = 0; i < length; i += 1) {
-    mismatch |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
-  }
+export async function middleware(request: NextRequest): Promise<NextResponse> {
+  const password = dashboardPassword();
 
-  return mismatch === 0;
-}
-
-function challenge(): NextResponse {
-  return new NextResponse('Authentication required', {
-    status: 401,
-    headers: {
-      'WWW-Authenticate': 'Basic realm="WooCommerce Audit Log", charset="UTF-8"',
-    },
-  });
-}
-
-export function middleware(request: NextRequest): NextResponse {
-  const user = process.env.DASHBOARD_USER;
-  const password = process.env.DASHBOARD_PASSWORD;
-
-  if (!user || !password) {
+  if (password === '') {
     return NextResponse.next();
   }
 
-  const header = request.headers.get('authorization');
+  const { pathname, search } = request.nextUrl;
 
-  if (!header || !header.toLowerCase().startsWith('basic ')) {
-    return challenge();
+  // Also lets the login form's server action (a POST to this same path) run.
+  if (pathname === LOGIN_PATH) {
+    return NextResponse.next();
   }
 
-  let decoded: string;
-  try {
-    decoded = atob(header.slice(6).trim());
-  } catch {
-    return challenge();
+  const token = request.cookies.get(SESSION_COOKIE)?.value;
+
+  if (await verifySessionToken(token, password)) {
+    return NextResponse.next();
   }
 
-  const separator = decoded.indexOf(':');
-  if (separator === -1) {
-    return challenge();
+  const url = request.nextUrl.clone();
+  url.pathname = LOGIN_PATH;
+  url.search = '';
+
+  // Come back to the filtered view that was asked for, not just `/`.
+  const target = `${pathname}${search}`;
+  if (target !== '/') {
+    url.searchParams.set('next', target);
   }
 
-  const providedUser = decoded.slice(0, separator);
-  const providedPassword = decoded.slice(separator + 1);
+  const response = NextResponse.redirect(url);
 
-  const ok =
-    constantTimeEquals(providedUser, user) &&
-    constantTimeEquals(providedPassword, password);
+  // Expired or signed with a previous password: drop it, so the browser stops
+  // sending a cookie that can never succeed again.
+  if (token) {
+    response.cookies.delete(SESSION_COOKIE);
+  }
 
-  return ok ? NextResponse.next() : challenge();
+  return response;
 }
 
 export const config = {
-  // `robots.txt` and the icons stay outside the challenge: a crawler that gets
-  // a 401 for robots.txt learns nothing, and browsers request the icon without
-  // credentials, which would otherwise trigger a second auth prompt.
+  // `robots.txt` and the icons stay outside the gate: a crawler that gets a
+  // redirect for robots.txt learns nothing, and browsers request the icon
+  // without cookies, which would otherwise render the login page as an icon.
   matcher: [
     '/((?!api/|_next/static|_next/image|favicon.ico|icon.svg|robots.txt|sitemap.xml).*)',
   ],
