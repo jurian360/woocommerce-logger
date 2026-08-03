@@ -1,0 +1,14 @@
+{
+  // The harnesses are executed by `node --experimental-strip-types`, not by a
+  // bundler, so their imports carry explicit `.ts` extensions. That is invalid
+  // under the app's config, hence this separate one.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "jsx": "preserve",
+    "plugins": []
+  },
+  "include": ["**/*.ts", "../types/**/*.ts"],
+  "exclude": []
+}

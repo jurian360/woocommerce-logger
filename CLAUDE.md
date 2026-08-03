@@ -56,6 +56,23 @@ plugin's diagnostics against a **running** instance over real HTTP:
 ENDPOINT=http://127.0.0.1:3000/api/logs/product-change SECRET=xxx php tests/plugin-live.php
 ```
 
+### `tests/` is excluded from the app's tsconfig — keep it that way
+
+The harnesses run under `node --experimental-strip-types`, which requires
+explicit `.ts` extensions on imports (`from '../lib/format.ts'`). The Next.js
+build rejects those unless `allowImportingTsExtensions` is on, which is not
+appropriate for app code. So:
+
+- root `tsconfig.json` has `"exclude": ["node_modules", "tests"]`
+- `tests/tsconfig.json` enables `allowImportingTsExtensions` for the harnesses
+- `npm run typecheck` runs **both** configs
+
+Adding a `.ts` file under `tests/` that the root config picks up will fail
+`next build` on Vercel with *"An import path can only end with a '.ts'
+extension"* — the build compiles fine and then dies in the typecheck phase.
+Always run `npm run build` locally before pushing, and note that a warm `.next`
+cache can hide it: `rm -rf .next` first.
+
 ## The four things that are easy to get wrong
 
 ### 1. WooCommerce erases `get_changes()` before the "after" hook

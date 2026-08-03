@@ -24,5 +24,9 @@
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
+  // `tests/` is excluded from the app build: those files are run directly by
+  // `node --experimental-strip-types`, which requires explicit `.ts` import
+  // extensions that the Next.js build rejects. They are typechecked separately
+  // via tests/tsconfig.json — see `npm run typecheck`.
+  "exclude": ["node_modules", "tests"]
 }
