@@ -27,12 +27,19 @@ Data flows one way only. The Next.js side never calls WordPress.
 | --- | --- |
 | `wordpress/wc-audit-logger.php` | The entire WordPress plugin, single file, no build step |
 | `app/api/logs/product-change/route.ts` | Ingest endpoint (`POST`) + health probe (`GET`) |
-| `app/page.tsx` | Server-rendered dashboard, last 50 entries |
+| `app/api/logs/cleanup/route.ts` | Retention purge, called daily by the cron in `vercel.json` |
+| `app/page.tsx` | Server-rendered dashboard, last 50 entries in the selected window |
+| `app/filter-bar.tsx` | Client component: day filter + SKU search, state lives in the URL |
+| `app/robots.ts` | `robots.txt` — `Disallow: /` for everything |
+| `app/icon.svg` / `app/favicon.ico` | Favicon. The SVG is the source of truth; the `.ico` is a rasterised copy for clients that ignore SVG icons |
 | `lib/db.ts` | Cached Mongoose connection |
 | `lib/format.ts` | Renders stored diffs into "from → to" lines |
+| `lib/log-query.ts` | Retention window, search-param parsing, Mongo filter building |
+| `lib/secret.ts` | Constant-time secret comparison, shared by both routes |
 | `models/AuditLog.ts` | Mongoose schema |
 | `types/audit.ts` | Shared TS types for the payload/record |
 | `middleware.ts` | Optional Basic Auth for the dashboard |
+| `vercel.json` | Cron schedule for the purge |
 | `tests/` | Standalone harnesses, no test framework |
 | `postman/` | Importable collection for manual API testing |
 
@@ -42,7 +49,7 @@ Data flows one way only. The Next.js side never calls WordPress.
 npm run dev        # local dev server
 npm run build      # production build (also typechecks)
 npm test           # TS + PHP harnesses
-npm run test:ts    # schema + formatter (26 assertions)
+npm run test:ts    # schema + formatter + log queries (44 assertions)
 npm run test:php   # plugin capture/dispatch (28 assertions)
 npm run typecheck  # tsc --noEmit
 npm run lint       # eslint
@@ -73,7 +80,7 @@ extension"* — the build compiles fine and then dies in the typecheck phase.
 Always run `npm run build` locally before pushing, and note that a warm `.next`
 cache can hide it: `rm -rf .next` first.
 
-## The four things that are easy to get wrong
+## The five things that are easy to get wrong
 
 ### 1. WooCommerce erases `get_changes()` before the "after" hook
 
@@ -143,6 +150,38 @@ scalars.
 
 Do not tighten this schema to "clean it up" — it would silently drop fields.
 
+### 5. Retention is two mechanisms, from one source of truth
+
+Entries live 14 days (`LOG_RETENTION_DAYS` to change it). That is enforced by:
+
+- **The purge** — `app/api/logs/cleanup/route.ts`, run daily by the cron in
+  `vercel.json`. Vercel only sends `Authorization: Bearer $CRON_SECRET` when
+  `CRON_SECRET` exists, so without it the job 401s and nothing is deleted, in
+  silence. The route also takes `X-Api-Secret`, and `?dry=1` counts instead of
+  deleting.
+- **The query bound** — every dashboard query carries `timestamp: { $gte: cutoff }`.
+  A daily job means "expired" and "deleted" are up to 24 hours apart; the bound
+  is what makes them look the same to a reader. Do not drop it "because the cron
+  handles it."
+
+Both come from `lib/log-query.ts`, which is pure and has no Mongoose import so
+`tests/schema-format.ts` can exercise it. That is also why `?days=` is clamped to
+the retention window — a wider window has nothing behind it.
+
+The dashboard filters (`?days=`, `?sku=`) live in the URL, are parsed by
+`parseLogQuery()`, and are rendered by the client component `app/filter-bar.tsx`.
+Two consequences:
+
+- `windowLabel()` lives in `lib/log-query.ts`, not in `filter-bar.tsx`. A server
+  component importing a value from a `'use client'` module gets a client
+  reference, not the function, and calling it during SSR fails.
+- SKU search is a `$regex` substring match, so the term **must** go through
+  `escapeRegex()`. `tests/schema-format.ts` locks that in.
+
+`middleware.ts` must keep excluding `robots.txt` and the icons from Basic Auth:
+a crawler that gets a 401 for `robots.txt` learns nothing, and the browser
+fetches the icon without credentials.
+
 ## The payload contract
 
 Produced by `build_payload()` in PHP, validated by zod in `route.ts`, typed in
@@ -182,9 +221,11 @@ check.
 
 ## Environment
 
-`MONGODB_URI` and `API_SECRET` are required. `MONGODB_DB`, `DASHBOARD_USER`,
-`DASHBOARD_PASSWORD`, `DASHBOARD_TIMEZONE` are optional. See
-`.env.local.example`. Vercel needs a **redeploy** after env var changes.
+`MONGODB_URI` and `API_SECRET` are required. `CRON_SECRET` (needed for the
+retention cron to authenticate), `LOG_RETENTION_DAYS` (default `14`),
+`MONGODB_DB`, `DASHBOARD_USER`, `DASHBOARD_PASSWORD`, `DASHBOARD_TIMEZONE` are
+optional. See `.env.local.example`. Vercel needs a **redeploy** after env var
+changes.
 
 Plugin config comes from `wp-config.php` constants, falling back to options, all
 overridable by filters — see the file's header block.

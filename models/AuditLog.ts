@@ -75,10 +75,13 @@ const AuditLogSchema = new Schema(
   }
 );
 
-// Dashboard query: newest first.
+// Dashboard query: newest first. Also serves the day filter and the retention
+// purge, which both select on `timestamp` alone.
 AuditLogSchema.index({ timestamp: -1 });
 // Per-product history.
 AuditLogSchema.index({ product_id: 1, timestamp: -1 });
+// Dashboard SKU search combined with the day filter and the newest-first sort.
+AuditLogSchema.index({ sku: 1, timestamp: -1 });
 
 export type AuditLogDocument = InferSchemaType<typeof AuditLogSchema>;
 

@@ -1,7 +1,15 @@
 import { dbConnect } from '@/lib/db';
 import AuditLog from '@/models/AuditLog';
 import { formatRelative, formatTimestamp, summarizeChanges } from '@/lib/format';
+import {
+  dayFilterOptions,
+  parseLogQuery,
+  retentionDays,
+  windowLabel,
+  type LogFilter,
+} from '@/lib/log-query';
 import type { AuditLogRecord } from '@/types/audit';
+import FilterBar from './filter-bar';
 import RefreshButton from './refresh-button';
 
 export const runtime = 'nodejs';
@@ -24,18 +32,19 @@ const DEFAULT_GROUP_STYLE =
 
 interface LoadResult {
   logs: AuditLogRecord[];
+  /** Matches for the current filter, which may exceed what is rendered. */
+  total: number;
   error: string | null;
 }
 
-async function loadLogs(): Promise<LoadResult> {
+async function loadLogs(filter: LogFilter): Promise<LoadResult> {
   try {
     await dbConnect();
 
-    const docs = await AuditLog.find({})
-      .sort({ timestamp: -1 })
-      .limit(LOG_LIMIT)
-      .lean()
-      .exec();
+    const [docs, total] = await Promise.all([
+      AuditLog.find(filter).sort({ timestamp: -1 }).limit(LOG_LIMIT).lean().exec(),
+      AuditLog.countDocuments(filter),
+    ]);
 
     // `lean()` returns plain objects; normalise _id to a string for React keys.
     const logs = docs.map((doc) => ({
@@ -43,11 +52,12 @@ async function loadLogs(): Promise<LoadResult> {
       _id: String(doc._id),
     })) as unknown as AuditLogRecord[];
 
-    return { logs, error: null };
+    return { logs, total, error: null };
   } catch (error) {
     console.error('[audit] Failed to load logs:', error);
     return {
       logs: [],
+      total: 0,
       error:
         error instanceof Error ? error.message : 'Unknown error while querying MongoDB.',
     };
@@ -117,22 +127,55 @@ function ChangesCell({ log }: { log: AuditLogRecord }) {
   );
 }
 
-export default async function DashboardPage() {
-  const { logs, error } = await loadLogs();
+interface DashboardPageProps {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
+
+export default async function DashboardPage({ searchParams }: DashboardPageProps) {
+  const params = await searchParams;
+  const retention = retentionDays();
+  const { filter, days, sku, isFiltered } = parseLogQuery({
+    days: params.days,
+    sku: params.sku,
+    max: retention,
+  });
+
+  const { logs, total, error } = await loadLogs(filter);
 
   return (
     <main className="mx-auto w-full max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
-      <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
+      <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-50">
             WooCommerce Audit Log
           </h1>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Last {LOG_LIMIT} product changes recorded from your shop.
+            Product changes from the last {windowLabel(days)}
+            {sku ? (
+              <>
+                {' '}
+                matching SKU <span className="font-mono">{sku}</span>
+              </>
+            ) : null}
+            {error ? null : (
+              <>
+                {' '}
+                — {total} {total === 1 ? 'entry' : 'entries'}
+                {total > logs.length ? `, showing the newest ${logs.length}` : ''}
+              </>
+            )}
+            .
           </p>
         </div>
         <RefreshButton />
       </header>
+
+      <FilterBar
+        days={days}
+        sku={sku}
+        options={dayFilterOptions(retention)}
+        retentionDays={retention}
+      />
 
       {error ? (
         <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
@@ -145,13 +188,34 @@ export default async function DashboardPage() {
         </div>
       ) : logs.length === 0 ? (
         <div className="rounded-lg border border-dashed border-slate-300 bg-white p-10 text-center dark:border-slate-700 dark:bg-slate-900">
-          <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
-            No changes logged yet.
-          </p>
-          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Activate the WordPress plugin, then edit a product&apos;s price, stock, status
-            or catalog visibility.
-          </p>
+          {isFiltered ? (
+            <>
+              <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                No changes match this filter.
+              </p>
+              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                {sku ? (
+                  <>
+                    Nothing with SKU <span className="font-mono">{sku}</span> changed in the
+                    last {windowLabel(days)}.{' '}
+                  </>
+                ) : (
+                  <>Nothing changed in the last {windowLabel(days)}. </>
+                )}
+                Widen the period or clear the search.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                No changes logged yet.
+              </p>
+              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                Activate the WordPress plugin, then edit a product&apos;s price, stock,
+                status or catalog visibility.
+              </p>
+            </>
+          )}
         </div>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
@@ -217,7 +281,8 @@ export default async function DashboardPage() {
       )}
 
       <p className="mt-6 text-xs text-slate-400 dark:text-slate-600">
-        Timestamps shown in {process.env.DASHBOARD_TIMEZONE || 'UTC'}.
+        Timestamps shown in {process.env.DASHBOARD_TIMEZONE || 'UTC'}. Entries are kept for{' '}
+        {windowLabel(retention)}; older ones are deleted by the daily cleanup job.
       </p>
     </main>
   );

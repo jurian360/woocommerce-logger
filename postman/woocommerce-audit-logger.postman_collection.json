@@ -1,13 +1,18 @@
 {
   "info": {
     "name": "WooCommerce Audit Logger",
-    "description": "Tests the audit-log ingest endpoint and dashboard.\n\nSetup: import the companion environment file, set `baseUrl` to your deployment (e.g. https://woocommerce-logger.vercel.app) and `apiSecret` to the same value as the API_SECRET environment variable in Vercel.\n\nRun the whole collection with the Collection Runner: requests 01-03 exercise the happy paths, 04-08 assert that bad requests are rejected.",
+    "description": "Tests the audit-log ingest endpoint, the dashboard filters and the retention purge.\n\nSetup: import the companion environment file, set `baseUrl` to your deployment (e.g. https://woocommerce-logger.vercel.app) and `apiSecret` to the same value as the API_SECRET environment variable in Vercel.\n\nRun the whole collection with the Collection Runner: requests 01-03 exercise the happy paths, 04-08 assert that bad requests are rejected, and 09-12 cover the dashboard, its day/SKU filters and the 14-day retention purge.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     {
       "key": "logPath",
       "value": "/api/logs/product-change",
+      "type": "string"
+    },
+    {
+      "key": "cleanupPath",
+      "value": "/api/logs/cleanup",
       "type": "string"
     }
   ],
@@ -392,6 +397,112 @@
           "host": ["{{baseUrl}}/"]
         },
         "description": "Server-rendered HTML. Run this after request 02 to confirm the row was persisted and is rendered.\n\nIf DASHBOARD_USER and DASHBOARD_PASSWORD are set on the deployment, this returns 401 until you configure Basic Auth on the Authorization tab."
+      }
+    },
+    {
+      "name": "10 · Dashboard filters (GET /?days=7&sku=)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('renders the dashboard', function () {",
+              "    pm.response.to.have.status(200);",
+              "    pm.expect(pm.response.text()).to.include('WooCommerce Audit Log');",
+              "});",
+              "",
+              "pm.test('echoes the active filter', function () {",
+              "    pm.expect(pm.response.text()).to.include('7 days');",
+              "});",
+              "",
+              "pm.test('finds the row logged by request 02', function () {",
+              "    pm.expect(pm.response.text()).to.include('SHIRT-01');",
+              "});",
+              "",
+              "if (pm.response.code === 401) {",
+              "    console.log('401 → DASHBOARD_USER/DASHBOARD_PASSWORD are set. Add them under the Authorization tab (Basic Auth).');",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/?days=7&sku=SHIRT-01",
+          "host": ["{{baseUrl}}/?days=7&sku=SHIRT-01"]
+        },
+        "description": "The dashboard narrowed to the last 7 days and searched by SKU. Run this after request 02, which logs a change for SHIRT-01.\n\n`days` is clamped to the retention window (14 by default), and `sku` is a case-insensitive substring match.\n\nReturns 401 while DASHBOARD_USER and DASHBOARD_PASSWORD are set — configure Basic Auth on the Authorization tab."
+      }
+    },
+    {
+      "name": "11 · Retention purge — dry run (GET)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('reports the retention window', function () {",
+              "    const body = pm.response.json();",
+              "    pm.expect(body.success).to.eql(true);",
+              "    pm.expect(body.dry_run).to.eql(true);",
+              "    pm.expect(body.retention_days).to.be.a(\"number\");",
+              "    pm.expect(body.cutoff).to.be.a(\"string\");",
+              "    pm.expect(body.deleted).to.be.a(\"number\");",
+              "});",
+              "",
+              "if (pm.response.code === 500) {",
+              "    console.log('500 → API_SECRET missing on the deployment, or the MongoDB query failed.');",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Api-Secret",
+            "value": "{{apiSecret}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}{{cleanupPath}}?dry=1",
+          "host": ["{{baseUrl}}{{cleanupPath}}?dry=1"]
+        },
+        "description": "Reports how many entries are older than the retention window without deleting anything. Drop `?dry=1` to actually purge.\n\nVercel runs this daily via the cron in vercel.json, authenticating with `Authorization: Bearer $CRON_SECRET`; by hand, X-Api-Secret works too."
+      }
+    },
+    {
+      "name": "12 · Purge without secret → 401",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('401 Unauthorized', function () {",
+              "    pm.response.to.have.status(401);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}{{cleanupPath}}",
+          "host": ["{{baseUrl}}{{cleanupPath}}"]
+        },
+        "description": "The purge deletes data, so an unauthenticated call must be rejected."
       }
     }
   ]

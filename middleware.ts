@@ -70,5 +70,10 @@ export function middleware(request: NextRequest): NextResponse {
 }
 
 export const config = {
-  matcher: ['/((?!api/|_next/static|_next/image|favicon.ico).*)'],
+  // `robots.txt` and the icons stay outside the challenge: a crawler that gets
+  // a 401 for robots.txt learns nothing, and browsers request the icon without
+  // credentials, which would otherwise trigger a second auth prompt.
+  matcher: [
+    '/((?!api/|_next/static|_next/image|favicon.ico|icon.svg|robots.txt|sitemap.xml).*)',
+  ],
 };
