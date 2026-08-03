@@ -28,8 +28,9 @@ Data flows one way only. The Next.js side never calls WordPress.
 | `wordpress/wc-audit-logger.php` | The entire WordPress plugin, single file, no build step |
 | `app/api/logs/product-change/route.ts` | Ingest endpoint (`POST`) + health probe (`GET`) |
 | `app/api/logs/cleanup/route.ts` | Retention purge, called daily by the cron in `vercel.json` |
-| `app/page.tsx` | Server-rendered dashboard, last 50 entries in the selected window |
+| `app/page.tsx` | Server-rendered dashboard, 50 entries per page in the selected window |
 | `app/filter-bar.tsx` | Client component: day filter + SKU search, state lives in the URL |
+| `app/pagination.tsx` | Server component: `next/link` page links below the table |
 | `app/robots.ts` | `robots.txt` — `Disallow: /` for everything |
 | `app/icon.svg` / `app/favicon.ico` | Favicon. The SVG is the source of truth; the `.ico` is a rasterised copy for clients that ignore SVG icons |
 | `lib/db.ts` | Cached Mongoose connection |
@@ -49,7 +50,7 @@ Data flows one way only. The Next.js side never calls WordPress.
 npm run dev        # local dev server
 npm run build      # production build (also typechecks)
 npm test           # TS + PHP harnesses
-npm run test:ts    # schema + formatter + log queries (44 assertions)
+npm run test:ts    # schema + formatter + log queries + paging (60 assertions)
 npm run test:php   # plugin capture/dispatch (28 assertions)
 npm run typecheck  # tsc --noEmit
 npm run lint       # eslint
@@ -80,7 +81,7 @@ extension"* — the build compiles fine and then dies in the typecheck phase.
 Always run `npm run build` locally before pushing, and note that a warm `.next`
 cache can hide it: `rm -rf .next` first.
 
-## The five things that are easy to get wrong
+## The six things that are easy to get wrong
 
 ### 1. WooCommerce erases `get_changes()` before the "after" hook
 
@@ -168,19 +169,38 @@ Both come from `lib/log-query.ts`, which is pure and has no Mongoose import so
 `tests/schema-format.ts` can exercise it. That is also why `?days=` is clamped to
 the retention window — a wider window has nothing behind it.
 
-The dashboard filters (`?days=`, `?sku=`) live in the URL, are parsed by
-`parseLogQuery()`, and are rendered by the client component `app/filter-bar.tsx`.
-Two consequences:
+The dashboard state (`?days=`, `?sku=`, `?page=`) lives in the URL, is parsed by
+`parseLogQuery()`, and is rendered by the client component `app/filter-bar.tsx`
+and the server component `app/pagination.tsx`. Consequences:
 
 - `windowLabel()` lives in `lib/log-query.ts`, not in `filter-bar.tsx`. A server
   component importing a value from a `'use client'` module gets a client
   reference, not the function, and calling it during SSR fails.
 - SKU search is a `$regex` substring match, so the term **must** go through
   `escapeRegex()`. `tests/schema-format.ts` locks that in.
+- Both components build their URLs with `logQueryHref()`, which omits defaults
+  so the unfiltered first page stays `/`. The filter bar always passes
+  `page: 1` — a filter change has no relationship to the page it started on.
 
 `middleware.ts` must keep excluding `robots.txt` and the icons from Basic Auth:
 a crawler that gets a 401 for `robots.txt` learns nothing, and the browser
 fetches the icon without credentials.
+
+### 6. Paging is `skip`/`limit`, and needs a tiebreaker plus a clamp
+
+- The window default is **24 hours** (`DEFAULT_WINDOW_DAYS`), not the retention
+  window; `LOG_PAGE_SIZE` (50) entries per page. Because the default view is now
+  narrower than retention, "nothing matches" and "nothing has ever arrived" are
+  different states — the empty state distinguishes them with an
+  `estimatedDocumentCount()`, a metadata read run only when the page is empty.
+- The sort is `{ timestamp: -1, _id: -1 }`. WooCommerce timestamps are
+  second-precision, so a bulk edit writes ties; without `_id` the order within a
+  tie is unspecified and `skip`/`limit` can repeat or drop rows between pages.
+- `page.tsx` counts **before** it finds, so the page number can be clamped to
+  `pageCount()`. A stale link to a page that no longer exists (entries purged,
+  filter narrowed) then shows the last page instead of an empty table.
+- `?page=` is capped at `MAX_PAGE` on parse, so a hand-typed number cannot ask
+  Mongo for a multi-million-document skip before the clamp is known.
 
 ## The payload contract
 

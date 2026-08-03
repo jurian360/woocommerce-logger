@@ -3,13 +3,22 @@ import AuditLog from '../models/AuditLog.ts';
 import { summarizeChanges, formatTimestamp } from '../lib/format.ts';
 import {
   DEFAULT_RETENTION_DAYS,
+  DEFAULT_WINDOW_DAYS,
+  LOG_PAGE_SIZE,
+  MAX_PAGE,
   MS_PER_DAY,
   cutoffFor,
   dayFilterOptions,
+  defaultWindowDays,
+  logQueryHref,
+  pageCount,
+  pageNumbers,
   parseDays,
   parseLogQuery,
+  parsePage,
   parseSku,
   resolveRetentionDays,
+  skipFor,
   windowLabel,
 } from '../lib/log-query.ts';
 
@@ -99,16 +108,85 @@ ok('window labels read naturally', () => {
   assert.equal(windowLabel(14), '14 days');
 });
 
-ok('days defaults to the full window', () => {
-  assert.equal(parseDays(undefined, 14), 14);
-  assert.equal(parseDays('', 14), 14);
-  assert.equal(parseDays('nonsense', 14), 14);
-  assert.equal(parseDays('0', 14), 14);
+ok('days defaults to 24 hours', () => {
+  assert.equal(DEFAULT_WINDOW_DAYS, 1);
+  assert.equal(parseDays(undefined, 14), 1);
+  assert.equal(parseDays('', 14), 1);
+  assert.equal(parseDays('nonsense', 14), 1);
+  assert.equal(parseDays('0', 14), 1);
+});
+ok('the default window never exceeds retention', () => {
+  assert.equal(defaultWindowDays(14), 1);
+  assert.equal(defaultWindowDays(1), 1);
 });
 ok('days never exceeds retention', () => assert.equal(parseDays('365', 14), 14));
-ok('days accepts a narrower window', () => assert.equal(parseDays('7', 14), 7));
+ok('days accepts a wider window than the default', () =>
+  assert.equal(parseDays('7', 14), 7));
 ok('days takes the first repeated param', () =>
   assert.equal(parseDays(['3', '7'], 14), 3));
+
+/* ---------- Pagination ------------------------------------------------------ */
+
+ok('page defaults to 1', () => {
+  assert.equal(parsePage(undefined), 1);
+  assert.equal(parsePage(''), 1);
+  assert.equal(parsePage('nonsense'), 1);
+  assert.equal(parsePage('0'), 1);
+  assert.equal(parsePage('-3'), 1);
+});
+ok('page parses and floors', () => {
+  assert.equal(parsePage('4'), 4);
+  assert.equal(parsePage('4.9'), 4);
+  assert.equal(parsePage(['2', '9']), 2);
+});
+ok('page is capped so skip stays sane', () =>
+  assert.equal(parsePage('99999999'), MAX_PAGE));
+
+ok('page size is 50', () => assert.equal(LOG_PAGE_SIZE, 50));
+ok('page count covers the remainder', () => {
+  assert.equal(pageCount(0, 50), 1);
+  assert.equal(pageCount(1, 50), 1);
+  assert.equal(pageCount(50, 50), 1);
+  assert.equal(pageCount(51, 50), 2);
+  assert.equal(pageCount(342, 50), 7);
+});
+ok('skip is zero-based', () => {
+  assert.equal(skipFor(1, 50), 0);
+  assert.equal(skipFor(3, 50), 100);
+});
+
+ok('page numbers are contiguous while they fit', () => {
+  assert.deepEqual(pageNumbers(1, 1), [1]);
+  assert.deepEqual(pageNumbers(3, 5), [1, 2, 3, 4, 5]);
+  assert.deepEqual(pageNumbers(1, 7), [1, 2, 3, 4, 5, 6, 7]);
+});
+ok('page numbers keep the ends and cluster on the current page', () => {
+  assert.deepEqual(pageNumbers(1, 20), [1, 2, 3, 4, 5, 6, 20]);
+  assert.deepEqual(pageNumbers(10, 20), [1, 8, 9, 10, 11, 12, 20]);
+  assert.deepEqual(pageNumbers(20, 20), [1, 15, 16, 17, 18, 19, 20]);
+});
+ok('page numbers clamp a page past the end', () =>
+  assert.deepEqual(pageNumbers(999, 20), [1, 15, 16, 17, 18, 19, 20]));
+ok('page numbers never exceed the maximum shown', () => {
+  for (const page of [1, 2, 9, 50, 99, 100]) {
+    assert.equal(pageNumbers(page, 100).length, 7, `page ${page}`);
+  }
+});
+
+ok('href omits the defaults', () =>
+  assert.equal(logQueryHref({ days: 1, sku: '', page: 1, defaultDays: 1 }), '/'));
+ok('href carries filters and page', () => {
+  assert.equal(
+    logQueryHref({ days: 7, sku: ' shirt ', page: 3, defaultDays: 1 }),
+    '/?days=7&sku=shirt&page=3'
+  );
+  assert.equal(logQueryHref({ days: 1, sku: '', page: 2, defaultDays: 1 }), '/?page=2');
+});
+ok('href escapes the search term', () =>
+  assert.equal(
+    logQueryHref({ days: 1, sku: 'A+B 2', page: 1, defaultDays: 1 }),
+    '/?sku=A%2BB+2'
+  ));
 
 ok('sku is trimmed and capped', () => {
   assert.equal(parseSku('  SHIRT-01 '), 'SHIRT-01');
@@ -116,17 +194,23 @@ ok('sku is trimmed and capped', () => {
   assert.equal(parseSku('x'.repeat(500)).length, 200);
 });
 
-ok('filter always bounds by the retention window', () => {
-  const { filter, isFiltered } = parseLogQuery({ max: 14, now });
-  assert.deepEqual(filter, { timestamp: { $gte: new Date('2026-07-20T10:00:00.000Z') } });
-  assert.equal(isFiltered, false);
-});
-ok('filter narrows to the requested days', () => {
-  const { filter, days, isFiltered } = parseLogQuery({ days: '1', max: 14, now });
+ok('filter defaults to the last 24 hours', () => {
+  const { filter, days, page } = parseLogQuery({ max: 14, now });
   assert.equal(days, 1);
-  assert.equal(isFiltered, true);
-  assert.deepEqual(filter.timestamp, { $gte: new Date('2026-08-02T10:00:00.000Z') });
+  assert.equal(page, 1);
+  assert.deepEqual(filter, { timestamp: { $gte: new Date('2026-08-02T10:00:00.000Z') } });
 });
+ok('filter widens to the requested days', () => {
+  const { filter, days, isFiltered } = parseLogQuery({ days: '14', max: 14, now });
+  assert.equal(days, 14);
+  // Nothing is hidden at the full retention window, so this is not "filtered".
+  assert.equal(isFiltered, false);
+  assert.deepEqual(filter.timestamp, { $gte: new Date('2026-07-20T10:00:00.000Z') });
+});
+ok('filter reports a narrowed window as filtered', () =>
+  assert.equal(parseLogQuery({ days: '3', max: 14, now }).isFiltered, true));
+ok('filter carries the requested page', () =>
+  assert.equal(parseLogQuery({ page: '4', max: 14, now }).page, 4));
 ok('filter searches SKU case-insensitively', () => {
   const { filter, sku } = parseLogQuery({ sku: ' shirt ', max: 14, now });
   assert.equal(sku, 'shirt');

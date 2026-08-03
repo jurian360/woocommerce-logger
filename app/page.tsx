@@ -2,21 +2,24 @@ import { dbConnect } from '@/lib/db';
 import AuditLog from '@/models/AuditLog';
 import { formatRelative, formatTimestamp, summarizeChanges } from '@/lib/format';
 import {
+  LOG_PAGE_SIZE,
   dayFilterOptions,
+  defaultWindowDays,
+  pageCount,
   parseLogQuery,
   retentionDays,
+  skipFor,
   windowLabel,
   type LogFilter,
 } from '@/lib/log-query';
 import type { AuditLogRecord } from '@/types/audit';
 import FilterBar from './filter-bar';
+import Pagination from './pagination';
 import RefreshButton from './refresh-button';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-
-const LOG_LIMIT = 50;
 
 const GROUP_STYLES: Record<string, string> = {
   price: 'bg-amber-50 text-amber-800 ring-amber-200 dark:bg-amber-950/40 dark:text-amber-200 dark:ring-amber-900',
@@ -32,19 +35,40 @@ const DEFAULT_GROUP_STYLE =
 
 interface LoadResult {
   logs: AuditLogRecord[];
-  /** Matches for the current filter, which may exceed what is rendered. */
+  /** Matches for the current filter, across all pages. */
   total: number;
+  /** The page actually rendered — the requested one, clamped to `pages`. */
+  page: number;
+  pages: number;
+  /** Whether the collection holds anything at all, filters aside. Separates
+   * "nothing arrived yet" from "nothing matches this filter" — which the
+   * default window, being narrower than retention, can no longer do alone. */
+  hasAnyLogs: boolean;
   error: string | null;
 }
 
-async function loadLogs(filter: LogFilter): Promise<LoadResult> {
+async function loadLogs(filter: LogFilter, requestedPage: number): Promise<LoadResult> {
   try {
     await dbConnect();
 
-    const [docs, total] = await Promise.all([
-      AuditLog.find(filter).sort({ timestamp: -1 }).limit(LOG_LIMIT).lean().exec(),
-      AuditLog.countDocuments(filter),
-    ]);
+    // Counted first, not in parallel with the find: the page number has to be
+    // clamped before it can be turned into a skip, otherwise a stale link to a
+    // page that no longer exists (entries purged, filter narrowed) renders an
+    // empty table instead of the last page.
+    const total = await AuditLog.countDocuments(filter);
+    const pages = pageCount(total, LOG_PAGE_SIZE);
+    const page = Math.min(requestedPage, pages);
+
+    const docs = await AuditLog.find(filter)
+      // `_id` breaks ties. Timestamps come from WooCommerce at second
+      // precision, so a bulk edit produces duplicates; without a tiebreaker
+      // their order is unspecified and skip/limit can repeat or drop rows
+      // across page boundaries.
+      .sort({ timestamp: -1, _id: -1 })
+      .skip(skipFor(page, LOG_PAGE_SIZE))
+      .limit(LOG_PAGE_SIZE)
+      .lean()
+      .exec();
 
     // `lean()` returns plain objects; normalise _id to a string for React keys.
     const logs = docs.map((doc) => ({
@@ -52,12 +76,18 @@ async function loadLogs(filter: LogFilter): Promise<LoadResult> {
       _id: String(doc._id),
     })) as unknown as AuditLogRecord[];
 
-    return { logs, total, error: null };
+    // Only when the view is empty, and only ever a metadata read.
+    const hasAnyLogs = total > 0 || (await AuditLog.estimatedDocumentCount()) > 0;
+
+    return { logs, total, page, pages, hasAnyLogs, error: null };
   } catch (error) {
     console.error('[audit] Failed to load logs:', error);
     return {
       logs: [],
       total: 0,
+      page: 1,
+      pages: 1,
+      hasAnyLogs: false,
       error:
         error instanceof Error ? error.message : 'Unknown error while querying MongoDB.',
     };
@@ -134,13 +164,24 @@ interface DashboardPageProps {
 export default async function DashboardPage({ searchParams }: DashboardPageProps) {
   const params = await searchParams;
   const retention = retentionDays();
-  const { filter, days, sku, isFiltered } = parseLogQuery({
+  const defaultDays = defaultWindowDays(retention);
+  const {
+    filter,
+    days,
+    sku,
+    page: requestedPage,
+    isFiltered,
+  } = parseLogQuery({
     days: params.days,
     sku: params.sku,
+    page: params.page,
     max: retention,
   });
 
-  const { logs, total, error } = await loadLogs(filter);
+  const { logs, total, page, pages, hasAnyLogs, error } = await loadLogs(
+    filter,
+    requestedPage
+  );
 
   return (
     <main className="mx-auto w-full max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
@@ -161,7 +202,7 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
               <>
                 {' '}
                 — {total} {total === 1 ? 'entry' : 'entries'}
-                {total > logs.length ? `, showing the newest ${logs.length}` : ''}
+                {pages > 1 ? `, page ${page} of ${pages}` : ''}
               </>
             )}
             .
@@ -174,7 +215,7 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
         days={days}
         sku={sku}
         options={dayFilterOptions(retention)}
-        retentionDays={retention}
+        defaultDays={defaultDays}
       />
 
       {error ? (
@@ -188,7 +229,7 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
         </div>
       ) : logs.length === 0 ? (
         <div className="rounded-lg border border-dashed border-slate-300 bg-white p-10 text-center dark:border-slate-700 dark:bg-slate-900">
-          {isFiltered ? (
+          {hasAnyLogs ? (
             <>
               <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
                 No changes match this filter.
@@ -202,7 +243,7 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
                 ) : (
                   <>Nothing changed in the last {windowLabel(days)}. </>
                 )}
-                Widen the period or clear the search.
+                {isFiltered ? 'Widen the period or clear the search.' : null}
               </p>
             </>
           ) : (
@@ -278,6 +319,18 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
             </tbody>
           </table>
         </div>
+      )}
+
+      {error || logs.length === 0 ? null : (
+        <Pagination
+          page={page}
+          pages={pages}
+          total={total}
+          pageSize={LOG_PAGE_SIZE}
+          days={days}
+          sku={sku}
+          defaultDays={defaultDays}
+        />
       )}
 
       <p className="mt-6 text-xs text-slate-400 dark:text-slate-600">
