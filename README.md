@@ -10,7 +10,7 @@ WordPress / WooCommerce            Vercel                       MongoDB Atlas
 ┌────────────────────────┐   POST (non-blocking)   ┌───────────────────┐
 │ wc-audit-logger.php    │ ──────────────────────► │ /api/logs/        │──► audit_logs
 │ before/after save hook │   X-Api-Secret header   │ product-change    │
-└────────────────────────┘                         │        /          │◄── last 50
+└────────────────────────┘                         │        /          │◄── paged
                                                    └───────────────────┘
 ```
 
@@ -22,8 +22,9 @@ WordPress / WooCommerce            Vercel                       MongoDB Atlas
 | `models/AuditLog.ts` | `AuditLog` schema — indexed `product_id`, dynamic `changes` |
 | `app/api/logs/product-change/route.ts` | `POST` ingest endpoint, `X-Api-Secret` auth |
 | `app/api/logs/cleanup/route.ts` | Retention purge, run daily by the Vercel cron |
-| `app/page.tsx` | Dashboard listing the 50 most recent changes |
+| `app/page.tsx` | Dashboard listing changes, 50 per page |
 | `app/filter-bar.tsx` | Day filter + SKU search above the table |
+| `app/pagination.tsx` | Page links below the table |
 | `lib/log-query.ts` | Retention window, filter parsing, Mongo query building |
 | `lib/format.ts` | Turns stored diffs into readable "from → to" lines |
 | `app/robots.ts` | `robots.txt` — disallows everything |
@@ -207,23 +208,26 @@ delivery is confirmed, and failures are written to the WooCommerce log.
 
 ## Using the dashboard
 
-The table shows the 50 most recent changes inside the selected window, newest
-first. Two filters sit above it, and both live in the URL, so a filtered view can
-be bookmarked or shared:
+The table shows the changes inside the selected window, newest first, **50 per
+page**. Page links sit below the table; the filters sit above it. All of it lives
+in the URL, so any view can be bookmarked or shared:
 
 | Control | Query parameter | Behaviour |
 | --- | --- | --- |
-| Period | `?days=` | `1`, `3`, `7` or `14`. Clamped to the retention window; anything missing or invalid falls back to the full window |
+| Period | `?days=` | `1`, `3`, `7` or `14`. **Defaults to `1` — the last 24 hours.** Clamped to the retention window; anything invalid falls back to the default |
 | SKU | `?sku=` | Case-insensitive substring match, so `shirt` finds `SHIRT-01`. Regex characters are escaped and searched literally |
+| Page | `?page=` | 1-based, 50 entries per page. Defaults to `1`; a page past the end shows the last page |
 
 ```
-/                          the full retention window
-/?days=1                   the last 24 hours
-/?sku=SHIRT-01             one SKU, full window
-/?days=7&sku=shirt         combined
+/                          the last 24 hours, newest 50
+/?page=2                   entries 51–100 of the same window
+/?days=14                  the full retention window
+/?sku=SHIRT-01             one SKU, last 24 hours
+/?days=7&sku=shirt&page=2  combined
 ```
 
-The default view (`/`) carries no parameters. `days` above the retention window
+The default view (`/`) carries no parameters: the last 24 hours, first page.
+Changing a filter always returns to page 1, and `days` above the retention window
 is silently clamped — there is no data behind it.
 
 ## Retention

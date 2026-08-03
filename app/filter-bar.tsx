@@ -3,7 +3,7 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, useState, useTransition, type FormEvent } from 'react';
 
-import { windowLabel } from '@/lib/log-query';
+import { logQueryHref, windowLabel } from '@/lib/log-query';
 
 interface FilterBarProps {
   /** Currently selected window, in days. */
@@ -12,14 +12,14 @@ interface FilterBarProps {
   sku: string;
   /** Selectable windows, widest last. */
   options: number[];
-  /** The widest window there is data for — also the default. */
-  retentionDays: number;
+  /** The window a bare `/` shows, and what "Clear" returns to. */
+  defaultDays: number;
 }
 
 const BASE_BUTTON =
   'rounded-md px-3 py-1.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60';
 
-export default function FilterBar({ days, sku, options, retentionDays }: FilterBarProps) {
+export default function FilterBar({ days, sku, options, defaultDays }: FilterBarProps) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [skuInput, setSkuInput] = useState(sku);
@@ -30,21 +30,12 @@ export default function FilterBar({ days, sku, options, retentionDays }: FilterB
   }, [sku]);
 
   function navigate(nextDays: number, nextSku: string) {
-    const params = new URLSearchParams();
+    // Always back to page 1: the page a filter change lands on has nothing to
+    // do with the page it started from. `logQueryHref` keeps defaults out of
+    // the URL, so the unfiltered dashboard is always just `/`.
+    const href = logQueryHref({ days: nextDays, sku: nextSku, page: 1, defaultDays });
 
-    // The default window and an empty search stay out of the URL, so the
-    // unfiltered dashboard is always just `/`.
-    if (nextDays !== retentionDays) {
-      params.set('days', String(nextDays));
-    }
-
-    const trimmed = nextSku.trim();
-    if (trimmed !== '') {
-      params.set('sku', trimmed);
-    }
-
-    const query = params.toString();
-    startTransition(() => router.push(query ? `/?${query}` : '/'));
+    startTransition(() => router.push(href));
   }
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -52,7 +43,7 @@ export default function FilterBar({ days, sku, options, retentionDays }: FilterB
     navigate(days, skuInput);
   }
 
-  const isFiltered = days !== retentionDays || sku !== '';
+  const isFiltered = days !== defaultDays || sku !== '';
 
   return (
     <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-3">
@@ -110,7 +101,7 @@ export default function FilterBar({ days, sku, options, retentionDays }: FilterB
             type="button"
             onClick={() => {
               setSkuInput('');
-              navigate(retentionDays, '');
+              navigate(defaultDays, '');
             }}
             disabled={isPending}
             className={`${BASE_BUTTON} text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100`}
