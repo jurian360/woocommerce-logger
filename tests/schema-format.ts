@@ -21,10 +21,40 @@ import {
   skipFor,
   windowLabel,
 } from '../lib/log-query.ts';
+import {
+  DEFAULT_TIME_ZONE,
+  defaultTimeZone,
+  intlTimeZone,
+  isValidTimeZone,
+  offsetHours,
+  offsetLabel,
+  parseOffsetZone,
+  parseTimeZone,
+  resolveTimeZone,
+  timeZoneLabel,
+  timeZoneOptions,
+} from '../lib/timezone.ts';
+import {
+  SESSION_COOKIE,
+  SESSION_MAX_AGE_SECONDS,
+  constantTimeEquals,
+  createSessionToken,
+  safeRedirect,
+  verifySessionToken,
+} from '../lib/auth.ts';
 
 let passed = 0;
 function ok(label: string, fn: () => void) {
   fn();
+  passed += 1;
+  console.log('ok:', label);
+}
+
+/** Same, for checks that have to await (the session cookie is HMAC-signed via
+ * Web Crypto, which is async). Must be awaited at the call site, or the final
+ * count prints before the check has run. */
+async function okAsync(label: string, fn: () => Promise<void>): Promise<void> {
+  await fn();
   passed += 1;
   console.log('ok:', label);
 }
@@ -269,9 +299,222 @@ ok('renders booleans', () => {
   assert.deepEqual({ from: line.from, to: line.to }, { from: 'Yes', to: 'No' });
 });
 
-process.env.DASHBOARD_TIMEZONE = 'UTC';
-ok('formats timestamp', () =>
+ok('formats timestamp in UTC by default', () =>
   assert.equal(formatTimestamp(new Date('2026-08-03T10:00:00Z')), '3 Aug 2026, 10:00:00'));
+ok('formats timestamp in the given zone', () => {
+  // UTC-3, spelled the way IANA spells it.
+  assert.equal(
+    formatTimestamp(new Date('2026-08-03T10:00:00Z'), 'Etc/GMT+3'),
+    '3 Aug 2026, 07:00:00'
+  );
+  // Crossing midnight backwards must move the date too.
+  assert.equal(
+    formatTimestamp(new Date('2026-08-03T01:00:00Z'), 'Etc/GMT+3'),
+    '2 Aug 2026, 22:00:00'
+  );
+});
+ok('falls back to UTC for an unusable zone', () =>
+  assert.equal(
+    formatTimestamp(new Date('2026-08-03T10:00:00Z'), 'Mars/Olympus'),
+    '3 Aug 2026, 10:00:00'
+  ));
 ok('handles invalid timestamp', () => assert.equal(formatTimestamp('not-a-date'), '—'));
+
+/* ---------- Timezones ------------------------------------------------------ */
+
+ok('parses the ways an offset gets written', () => {
+  assert.equal(parseOffsetZone('UTC-3'), 'UTC-3');
+  assert.equal(parseOffsetZone('utc -03:00'), 'UTC-3');
+  assert.equal(parseOffsetZone('GMT+2'), 'UTC+2');
+  assert.equal(parseOffsetZone('-3'), 'UTC-3');
+  assert.equal(parseOffsetZone('+05'), 'UTC+5');
+});
+ok('parses zero as plain UTC', () => {
+  assert.equal(parseOffsetZone('UTC'), 'UTC');
+  assert.equal(parseOffsetZone('gmt'), 'UTC');
+  assert.equal(parseOffsetZone('-0'), 'UTC');
+  assert.equal(parseOffsetZone('+00:00'), 'UTC');
+});
+ok('rejects what is not an offset', () => {
+  assert.equal(parseOffsetZone('Europe/Amsterdam'), null);
+  assert.equal(parseOffsetZone(''), null);
+  assert.equal(parseOffsetZone('nonsense'), null);
+});
+ok('rejects offsets Etc/GMT cannot express', () => {
+  // Half-hour zones exist, `Etc/GMT*` does not cover them — use the IANA name.
+  assert.equal(parseOffsetZone('UTC+05:30'), null);
+  assert.equal(parseOffsetZone('UTC-13'), null);
+  assert.equal(parseOffsetZone('UTC+15'), null);
+});
+
+ok('reads back the offset it stores', () => {
+  assert.equal(offsetHours('UTC'), 0);
+  assert.equal(offsetHours('UTC-3'), -3);
+  assert.equal(offsetHours('UTC+14'), 14);
+  assert.equal(offsetHours('Europe/Amsterdam'), null);
+});
+ok('inverts the sign for the IANA spelling', () => {
+  // The whole reason `Etc/GMT+3` is never shown to a reader.
+  assert.equal(intlTimeZone('UTC-3'), 'Etc/GMT+3');
+  assert.equal(intlTimeZone('UTC+2'), 'Etc/GMT-2');
+  assert.equal(intlTimeZone('UTC'), 'UTC');
+  assert.equal(intlTimeZone('Europe/Amsterdam'), 'Europe/Amsterdam');
+});
+ok('every offset in range is a real zone', () => {
+  for (let hours = -12; hours <= 14; hours += 1) {
+    const zone = hours === 0 ? 'UTC' : `UTC${hours > 0 ? '+' : '-'}${Math.abs(hours)}`;
+    assert.ok(isValidTimeZone(zone), zone);
+  }
+});
+ok('validates IANA names', () => {
+  assert.equal(isValidTimeZone('Europe/Amsterdam'), true);
+  assert.equal(isValidTimeZone('Mars/Olympus'), false);
+  assert.equal(isValidTimeZone(''), false);
+});
+
+ok('resolves a requested zone', () => {
+  assert.equal(resolveTimeZone('UTC-3'), 'UTC-3');
+  assert.equal(resolveTimeZone('Europe/Amsterdam'), 'Europe/Amsterdam');
+  assert.equal(resolveTimeZone('europe/amsterdam'), 'Europe/Amsterdam');
+});
+ok('falls back instead of throwing on a bad zone', () => {
+  assert.equal(DEFAULT_TIME_ZONE, 'UTC');
+  assert.equal(resolveTimeZone(undefined), 'UTC');
+  assert.equal(resolveTimeZone(''), 'UTC');
+  assert.equal(resolveTimeZone('Mars/Olympus'), 'UTC');
+  assert.equal(resolveTimeZone('Mars/Olympus', 'Europe/Amsterdam'), 'Europe/Amsterdam');
+});
+
+ok('DASHBOARD_TIMEZONE accepts either form', () => {
+  process.env.DASHBOARD_TIMEZONE = 'UTC-3';
+  assert.equal(defaultTimeZone(), 'UTC-3');
+  process.env.DASHBOARD_TIMEZONE = 'Europe/Amsterdam';
+  assert.equal(defaultTimeZone(), 'Europe/Amsterdam');
+  process.env.DASHBOARD_TIMEZONE = 'not-a-zone';
+  assert.equal(defaultTimeZone(), 'UTC');
+  delete process.env.DASHBOARD_TIMEZONE;
+  assert.equal(defaultTimeZone(), 'UTC');
+});
+ok('?tz= overrides the configured default', () => {
+  assert.equal(parseTimeZone('UTC-3', 'Europe/Amsterdam'), 'UTC-3');
+  assert.equal(parseTimeZone(undefined, 'Europe/Amsterdam'), 'Europe/Amsterdam');
+  assert.equal(parseTimeZone(['UTC-3', 'UTC+9'], 'UTC'), 'UTC-3');
+  // A shared link with a broken zone must render, not 500.
+  assert.equal(parseTimeZone('Mars/Olympus', 'UTC'), 'UTC');
+});
+
+const winter = new Date('2026-01-15T12:00:00Z');
+const summer = new Date('2026-07-15T12:00:00Z');
+
+ok('labels an offset without repeating itself', () => {
+  assert.equal(offsetLabel('UTC-3', summer), 'UTC-03:00');
+  assert.equal(offsetLabel('UTC', summer), 'UTC+00:00');
+  assert.equal(timeZoneLabel('UTC-3', summer), 'UTC-03:00');
+});
+ok('labels a named zone with its offset at that moment', () => {
+  assert.equal(timeZoneLabel('Europe/Amsterdam', winter), 'Europe/Amsterdam (UTC+01:00)');
+  assert.equal(timeZoneLabel('Europe/Amsterdam', summer), 'Europe/Amsterdam (UTC+02:00)');
+  assert.equal(timeZoneLabel('America/New_York', summer), 'America/New York (UTC-04:00)');
+});
+
+ok('the picker offers every offset and no duplicates', () => {
+  const [named, offsets] = timeZoneOptions('UTC', summer);
+  assert.equal(offsets.options.length, 27); // -12 … +14
+  assert.equal(offsets.options[0].value, 'UTC+14');
+  assert.ok(offsets.options.some((option) => option.value === 'UTC-3'));
+
+  const values = [...named.options, ...offsets.options].map((option) => option.value);
+  assert.equal(new Set(values).size, values.length);
+});
+ok('the picker keeps a hand-typed zone selectable', () => {
+  const [named] = timeZoneOptions('Africa/Kampala', summer);
+  assert.ok(named.options.some((option) => option.value === 'Africa/Kampala'));
+});
+
+ok('href carries a non-default timezone', () => {
+  assert.equal(
+    logQueryHref({ days: 1, sku: '', page: 1, defaultDays: 1, tz: 'UTC-3', defaultTz: 'UTC' }),
+    '/?tz=UTC-3'
+  );
+  assert.equal(
+    logQueryHref({ days: 7, sku: 'shirt', page: 2, defaultDays: 1, tz: 'UTC-3', defaultTz: 'UTC' }),
+    '/?days=7&sku=shirt&page=2&tz=UTC-3'
+  );
+});
+ok('href omits the configured timezone', () => {
+  assert.equal(
+    logQueryHref({ days: 1, sku: '', page: 1, defaultDays: 1, tz: 'UTC', defaultTz: 'UTC' }),
+    '/'
+  );
+  assert.equal(
+    logQueryHref({
+      days: 1,
+      sku: '',
+      page: 1,
+      defaultDays: 1,
+      tz: 'Europe/Amsterdam',
+      defaultTz: 'Europe/Amsterdam',
+    }),
+    '/'
+  );
+});
+
+/* ---------- Dashboard login ------------------------------------------------ */
+
+const PASSWORD = 'correct horse battery staple';
+const nowMs = Date.parse('2026-08-03T10:00:00.000Z');
+
+ok('compares in constant time, correctly', () => {
+  assert.equal(constantTimeEquals('abc', 'abc'), true);
+  assert.equal(constantTimeEquals('abc', 'abd'), false);
+  assert.equal(constantTimeEquals('abc', 'abcd'), false);
+  assert.equal(constantTimeEquals('', ''), true);
+});
+
+ok('a session lasts a week', () =>
+  assert.equal(SESSION_MAX_AGE_SECONDS, 7 * 24 * 60 * 60));
+ok('the cookie has a stable name', () =>
+  assert.equal(SESSION_COOKIE, 'wc_audit_session'));
+
+const token = await createSessionToken(PASSWORD, nowMs);
+
+ok('token carries its own expiry', () => {
+  const [expiry, signature] = token.split('.');
+  assert.equal(Number(expiry), nowMs + SESSION_MAX_AGE_SECONDS * 1000);
+  assert.ok(signature.length > 20);
+  // The password must not be recoverable by reading the cookie.
+  assert.ok(!token.includes(PASSWORD));
+});
+
+await okAsync('token verifies for the password that signed it', async () =>
+  assert.equal(await verifySessionToken(token, PASSWORD, nowMs), true));
+await okAsync('token fails for a different password', async () =>
+  assert.equal(await verifySessionToken(token, 'wrong', nowMs), false));
+await okAsync('token fails once expired', async () => {
+  const justAfter = nowMs + SESSION_MAX_AGE_SECONDS * 1000 + 1;
+  assert.equal(await verifySessionToken(token, PASSWORD, justAfter), false);
+});
+await okAsync('a stretched expiry does not verify', async () => {
+  const [, signature] = token.split('.');
+  const stretched = `${nowMs + 10 * 365 * 24 * 3600 * 1000}.${signature}`;
+  assert.equal(await verifySessionToken(stretched, PASSWORD, nowMs), false);
+});
+await okAsync('malformed tokens are rejected', async () => {
+  for (const bad of ['', 'nonsense', `${nowMs}.`, '.sig', '1e99.sig', ` ${nowMs}.sig`]) {
+    assert.equal(await verifySessionToken(bad, PASSWORD, nowMs), false, bad);
+  }
+  assert.equal(await verifySessionToken(undefined, PASSWORD, nowMs), false);
+});
+await okAsync('no password means no valid session', async () =>
+  assert.equal(await verifySessionToken(token, '', nowMs), false));
+
+ok('post-login redirect stays on this site', () => {
+  assert.equal(safeRedirect('/?days=7&sku=shirt'), '/?days=7&sku=shirt');
+  assert.equal(safeRedirect(undefined), '/');
+  assert.equal(safeRedirect(''), '/');
+  assert.equal(safeRedirect('https://evil.example.com'), '/');
+  assert.equal(safeRedirect('//evil.example.com'), '/');
+  assert.equal(safeRedirect('/\\evil.example.com'), '/');
+});
 
 console.log(`\nAll ${passed} TS checks passed.`);

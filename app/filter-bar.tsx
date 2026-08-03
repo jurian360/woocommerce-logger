@@ -14,12 +14,23 @@ interface FilterBarProps {
   options: number[];
   /** The window a bare `/` shows, and what "Clear" returns to. */
   defaultDays: number;
+  /** Display zone, carried into every link so a filter change keeps it. */
+  timeZone: string;
+  /** `DASHBOARD_TIMEZONE`, which `logQueryHref` leaves out of the URL. */
+  defaultTimeZone: string;
 }
 
 const BASE_BUTTON =
   'rounded-md px-3 py-1.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60';
 
-export default function FilterBar({ days, sku, options, defaultDays }: FilterBarProps) {
+export default function FilterBar({
+  days,
+  sku,
+  options,
+  defaultDays,
+  timeZone,
+  defaultTimeZone,
+}: FilterBarProps) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [skuInput, setSkuInput] = useState(sku);
@@ -33,7 +44,14 @@ export default function FilterBar({ days, sku, options, defaultDays }: FilterBar
     // Always back to page 1: the page a filter change lands on has nothing to
     // do with the page it started from. `logQueryHref` keeps defaults out of
     // the URL, so the unfiltered dashboard is always just `/`.
-    const href = logQueryHref({ days: nextDays, sku: nextSku, page: 1, defaultDays });
+    const href = logQueryHref({
+      days: nextDays,
+      sku: nextSku,
+      page: 1,
+      defaultDays,
+      tz: timeZone,
+      defaultTz: defaultTimeZone,
+    });
 
     startTransition(() => router.push(href));
   }

@@ -24,12 +24,16 @@ WordPress / WooCommerce            Vercel                       MongoDB Atlas
 | `app/api/logs/cleanup/route.ts` | Retention purge, run daily by the Vercel cron |
 | `app/page.tsx` | Dashboard listing changes, 50 per page |
 | `app/filter-bar.tsx` | Day filter + SKU search above the table |
+| `app/timezone-select.tsx` | Timezone picker in the header |
 | `app/pagination.tsx` | Page links below the table |
+| `app/login/` | Password login screen and its server actions |
 | `lib/log-query.ts` | Retention window, filter parsing, Mongo query building |
 | `lib/format.ts` | Turns stored diffs into readable "from → to" lines |
+| `lib/timezone.ts` | Resolves `?tz=` / `DASHBOARD_TIMEZONE` into a zone to render in |
+| `lib/auth.ts` | Dashboard password check and signed session cookie |
 | `app/robots.ts` | `robots.txt` — disallows everything |
 | `app/icon.svg`, `app/favicon.ico` | Favicon (the SVG is the source; the `.ico` is a rasterised copy) |
-| `middleware.ts` | Optional HTTP Basic Auth for the dashboard |
+| `middleware.ts` | Sends anyone without a session cookie to the login screen |
 | `vercel.json` | Cron schedule for the retention purge |
 | `wordpress/wc-audit-logger.php` | The WordPress plugin that sends the events |
 
@@ -103,18 +107,17 @@ Production (and Preview, if you use it):
 | `CRON_SECRET` | no* | Authenticates the daily retention cron; without it the purge returns `401` |
 | `MONGODB_DB` | no | Overrides the database name from the URI |
 | `LOG_RETENTION_DAYS` | no | How long entries are kept (default `14`) |
-| `DASHBOARD_USER` | no | Enables Basic Auth on the dashboard when set with the password |
-| `DASHBOARD_PASSWORD` | no | See above |
-| `DASHBOARD_TIMEZONE` | no | IANA zone for rendering timestamps (default `UTC`) |
+| `DASHBOARD_PASSWORD` | no | Password for the dashboard login screen. Unset means no login at all |
+| `DASHBOARD_TIMEZONE` | no | Timezone the dashboard starts in — an IANA name or a `UTC±H` offset (default `UTC`) |
 
 \* Optional only if you do not want automatic pruning. Vercel attaches
 `Authorization: Bearer $CRON_SECRET` to cron invocations, and only when the
 variable exists — see [Retention](#retention).
 
 > The dashboard shows who changed what and when. Unless you set
-> `DASHBOARD_USER` **and** `DASHBOARD_PASSWORD`, anyone with the URL can read it.
-> The page also sends `noindex` and `robots.txt` disallows every crawler, but
-> neither is access control.
+> `DASHBOARD_PASSWORD`, anyone with the URL can read it. The page also sends
+> `noindex` and `robots.txt` disallows every crawler, but neither is access
+> control.
 
 ## 4. Install the WordPress plugin
 
@@ -217,18 +220,70 @@ in the URL, so any view can be bookmarked or shared:
 | Period | `?days=` | `1`, `3`, `7` or `14`. **Defaults to `1` — the last 24 hours.** Clamped to the retention window; anything invalid falls back to the default |
 | SKU | `?sku=` | Case-insensitive substring match, so `shirt` finds `SHIRT-01`. Regex characters are escaped and searched literally |
 | Page | `?page=` | 1-based, 50 entries per page. Defaults to `1`; a page past the end shows the last page |
+| Timezone | `?tz=` | Zone the timestamps are rendered in. Defaults to `DASHBOARD_TIMEZONE`, then UTC |
 
 ```
 /                          the last 24 hours, newest 50
 /?page=2                   entries 51–100 of the same window
 /?days=14                  the full retention window
 /?sku=SHIRT-01             one SKU, last 24 hours
+/?tz=UTC-3                 the same entries, three hours behind UTC
 /?days=7&sku=shirt&page=2  combined
 ```
 
 The default view (`/`) carries no parameters: the last 24 hours, first page.
 Changing a filter always returns to page 1, and `days` above the retention window
-is silently clamped — there is no data behind it.
+is silently clamped — there is no data behind it. Changing the timezone keeps the
+page you are on: it changes how the rows read, not which rows match.
+
+### Timezone
+
+The picker in the header sets the zone the timestamps are rendered in. It offers
+two kinds of value, and `?tz=` and `DASHBOARD_TIMEZONE` both accept either:
+
+| Kind | Example | Behaviour |
+| --- | --- | --- |
+| IANA zone | `Europe/Amsterdam`, `America/Sao_Paulo` | Follows that region's DST — the offset changes across the year |
+| Fixed offset | `UTC-3`, `UTC+2`, `UTC` | Always exactly that far from UTC, all year |
+
+So **UTC−3** is `?tz=UTC-3`, and a zone not in the picker can be typed straight
+into the URL (`?tz=Africa/Kampala`) — it will be selected when the page loads.
+Whole hours only for fixed offsets, `-12` through `+14`; half-hour zones such as
+India are available under their IANA name (`Asia/Kolkata`).
+
+Two things this does *not* change: entries are always **stored** in UTC, and the
+day filter is always measured from now backwards, so switching zones never moves
+an entry in or out of the window. Only the rendered text changes.
+
+Set `DASHBOARD_TIMEZONE` to the zone the shop is run from and the picker starts
+there for everyone; anything unrecognised falls back to UTC rather than failing.
+
+## Signing in
+
+Set `DASHBOARD_PASSWORD` and the dashboard asks for it:
+
+```
+DASHBOARD_PASSWORD="a long random string"
+```
+
+There is no username — one password, one shop, one audit log. Everything except
+`/api/*`, `robots.txt` and the icons is behind it; the API routes keep
+authenticating with the `X-Api-Secret` header, since a redirect to a login page
+would be a strange answer to give the WordPress plugin.
+
+- A successful login sets an **HTTP-only, signed cookie** that lasts **7 days**,
+  then the login screen asks again. The password itself is never in the cookie.
+- The cookie is signed **with the password**, so changing `DASHBOARD_PASSWORD`
+  signs everyone out at once. That is the "revoke access now" switch — on Vercel,
+  remember the change only takes effect after a redeploy.
+- **Sign out** is in the header, next to Refresh.
+- Leaving `DASHBOARD_PASSWORD` empty disables the login screen entirely and the
+  dashboard is readable by anyone with the URL. Convenient locally, a mistake in
+  production.
+
+Nothing is stored server-side, so this survives Vercel's serverless model without
+a session table — but it also means there is no per-user history and no way to
+sign out one browser without signing out all of them.
 
 ## Retention
 
@@ -349,9 +404,10 @@ row should be at the top.
 | `500` on `GET` | `API_SECRET` is not set on the deployment | Add it in Vercel, then redeploy — env var changes need a new deployment |
 | `500` on `POST` | The MongoDB write failed | Check `MONGODB_URI`, and that Atlas **Network Access** allows `0.0.0.0/0`; Vercel's egress IPs are dynamic |
 
-A `401` on the **dashboard** rather than the API means `DASHBOARD_USER` and
-`DASHBOARD_PASSWORD` are set. Add them under Postman's **Authorization** tab as
-Basic Auth.
+A **redirect to `/login`** rather than the dashboard HTML means
+`DASHBOARD_PASSWORD` is set. Postman cannot fill in a login form; either open the
+dashboard in a browser, or copy the `wc_audit_session` cookie a signed-in browser
+holds into Postman's **Cookies** jar for the domain.
 
 ## API
 
@@ -417,6 +473,22 @@ day filter can never ask for a window wider than what is retained.
 **The purge is not fire-and-forget.** It answers with the cutoff it used and the
 number of rows it removed, logs the same line to the function log, and supports
 `?dry=1` for checking it before trusting it. See [Retention](#retention).
+
+**The session cookie is signed with the password.** No session store, no user
+table — the cookie is `<expiry>.<HMAC-SHA256>` keyed on `DASHBOARD_PASSWORD`,
+which is what makes it work on serverless where any request may hit a fresh
+instance. It also gives the revocation story for free: change the password and
+every outstanding cookie stops verifying. The expiry is inside the signature, so
+editing the browser's copy cannot extend a session. Verification happens in
+`middleware.ts`, which is Edge — hence Web Crypto in `lib/auth.ts` rather than
+the `node:crypto` used by `lib/secret.ts` for the API routes.
+
+**Timestamps are rendered in a zone, never converted into one.** Mongo stores
+UTC, the retention cutoff is computed in UTC, and the day filter is measured
+backwards from now — so the zone touches nothing but the text in the table. A
+fixed offset is written `UTC-3` in the URL and translated to its IANA spelling
+(`Etc/GMT+3` — the sign is inverted there, a POSIX inheritance) in exactly one
+function, so no reader ever sees the confusing form.
 
 ## Scripts
 

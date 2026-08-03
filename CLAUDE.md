@@ -30,16 +30,20 @@ Data flows one way only. The Next.js side never calls WordPress.
 | `app/api/logs/cleanup/route.ts` | Retention purge, called daily by the cron in `vercel.json` |
 | `app/page.tsx` | Server-rendered dashboard, 50 entries per page in the selected window |
 | `app/filter-bar.tsx` | Client component: day filter + SKU search, state lives in the URL |
+| `app/timezone-select.tsx` | Client component: timezone picker, also URL state (`?tz=`) |
 | `app/pagination.tsx` | Server component: `next/link` page links below the table |
+| `app/login/` | Password login screen: `page.tsx`, `login-form.tsx`, and the `login`/`logout` server actions |
 | `app/robots.ts` | `robots.txt` — `Disallow: /` for everything |
 | `app/icon.svg` / `app/favicon.ico` | Favicon. The SVG is the source of truth; the `.ico` is a rasterised copy for clients that ignore SVG icons |
 | `lib/db.ts` | Cached Mongoose connection |
 | `lib/format.ts` | Renders stored diffs into "from → to" lines |
 | `lib/log-query.ts` | Retention window, search-param parsing, Mongo filter building |
+| `lib/timezone.ts` | Resolves a requested zone, maps `UTC±H` to its IANA name |
 | `lib/secret.ts` | Constant-time secret comparison, shared by both routes |
+| `lib/auth.ts` | Dashboard password + signed session cookie (Edge-safe) |
 | `models/AuditLog.ts` | Mongoose schema |
 | `types/audit.ts` | Shared TS types for the payload/record |
-| `middleware.ts` | Optional Basic Auth for the dashboard |
+| `middleware.ts` | Sends anyone without a valid session cookie to `/login` |
 | `vercel.json` | Cron schedule for the purge |
 | `tests/` | Standalone harnesses, no test framework |
 | `postman/` | Importable collection for manual API testing |
@@ -50,7 +54,7 @@ Data flows one way only. The Next.js side never calls WordPress.
 npm run dev        # local dev server
 npm run build      # production build (also typechecks)
 npm test           # TS + PHP harnesses
-npm run test:ts    # schema + formatter + log queries + paging (60 assertions)
+npm run test:ts    # schema + formatter + log queries + paging + timezone + auth (91 assertions)
 npm run test:php   # plugin capture/dispatch (28 assertions)
 npm run typecheck  # tsc --noEmit
 npm run lint       # eslint
@@ -81,7 +85,7 @@ extension"* — the build compiles fine and then dies in the typecheck phase.
 Always run `npm run build` locally before pushing, and note that a warm `.next`
 cache can hide it: `rm -rf .next` first.
 
-## The six things that are easy to get wrong
+## The eight things that are easy to get wrong
 
 ### 1. WooCommerce erases `get_changes()` before the "after" hook
 
@@ -182,9 +186,9 @@ and the server component `app/pagination.tsx`. Consequences:
   so the unfiltered first page stays `/`. The filter bar always passes
   `page: 1` — a filter change has no relationship to the page it started on.
 
-`middleware.ts` must keep excluding `robots.txt` and the icons from Basic Auth:
-a crawler that gets a 401 for `robots.txt` learns nothing, and the browser
-fetches the icon without credentials.
+`middleware.ts` must keep excluding `robots.txt` and the icons from the login
+gate: a crawler that gets redirected for `robots.txt` learns nothing, and the
+browser fetches the icon without cookies.
 
 ### 6. Paging is `skip`/`limit`, and needs a tiebreaker plus a clamp
 
@@ -201,6 +205,61 @@ fetches the icon without credentials.
   filter narrowed) then shows the last page instead of an empty table.
 - `?page=` is capped at `MAX_PAGE` on parse, so a hand-typed number cannot ask
   Mongo for a multi-million-document skip before the clamp is known.
+
+### 7. The dashboard timezone is display-only, and `Etc/GMT` has the sign backwards
+
+`?tz=` (and `DASHBOARD_TIMEZONE`) select the zone timestamps are *rendered* in.
+Nothing else may depend on it: Mongo stores UTC, `cutoffFor()` subtracts from
+`now`, and the retention purge compares UTC — so switching zones can never move
+an entry in or out of the window. Keep it that way; a zone-aware query would
+make "the last 24 hours" mean two different things on two screens.
+
+Two values are accepted, both by `?tz=` and by the env var:
+
+- an IANA name (`Europe/Amsterdam`), which follows DST;
+- a fixed whole-hour offset, canonically written `UTC-3`.
+
+`UTC-3` is stored and shown in that form, **never** as `Etc/GMT+3`, even though
+that is its IANA name — the `Etc/GMT*` zones invert the sign (POSIX heritage), so
+`Etc/GMT+3` is UTC−3 and putting it in a URL shows every reader the wrong number.
+`intlTimeZone()` is the single place that does the inversion, right before
+handing the value to `Intl`. Only whole hours in `-12…+14` are expressible that
+way; half-hour zones must use their IANA name, and `parseOffsetZone()` returns
+`null` for the rest rather than guessing.
+
+Everything in `lib/timezone.ts` falls back instead of throwing — a shared link
+carrying a zone that no longer exists must still render the page. That is also
+why `lib/format.ts` takes an already-resolved zone (and imports nothing at
+runtime, so `tests/` can load it under `--experimental-strip-types`, where the
+`@/` alias does not resolve). The picker's option labels are built on the server
+and passed down as props; recomputing them on the client would risk a hydration
+mismatch across a DST boundary.
+
+### 8. The login is one password, and the cookie is signed with it
+
+`DASHBOARD_PASSWORD` set → `/login` asks for it and `middleware.ts` redirects
+everything else. Unset → no gate at all, which is what local development wants.
+There is no username and no session store; the cookie is `<expiry>.<HMAC>`, keyed
+on the password itself, which has three consequences worth keeping:
+
+- **Rotating the password invalidates every session.** The key that signed them
+  is gone. This is the revoke switch, and it is the reason not to "improve" the
+  key derivation into something password-independent.
+- **The expiry is inside the signature**, so editing the cookie's `Max-Age`
+  cannot extend a session.
+- **`middleware.ts` is Edge**, so verification uses Web Crypto and `btoa` in
+  `lib/auth.ts` — not `node:crypto`/`Buffer`. `lib/secret.ts` stays Node-only and
+  keeps guarding the API routes; the two do not merge.
+
+`/api/*` is outside the matcher and keeps using `X-Api-Secret`: the WordPress
+plugin sends with `'blocking' => false` and would never see a redirect to a login
+form, let alone follow it.
+
+`app/login/actions.ts` is `'use server'`, so **every export must be an async
+function** — the initial `useActionState` value lives in the client component for
+that reason. `redirect()` works by throwing, so it must stay outside `try`, and
+the post-login target goes through `safeRedirect()`: `?next=` comes from the URL
+bar, and echoing it back unchecked is an open redirect.
 
 ## The payload contract
 
@@ -243,8 +302,9 @@ check.
 
 `MONGODB_URI` and `API_SECRET` are required. `CRON_SECRET` (needed for the
 retention cron to authenticate), `LOG_RETENTION_DAYS` (default `14`),
-`MONGODB_DB`, `DASHBOARD_USER`, `DASHBOARD_PASSWORD`, `DASHBOARD_TIMEZONE` are
-optional. See `.env.local.example`. Vercel needs a **redeploy** after env var
+`MONGODB_DB`, `DASHBOARD_PASSWORD` (unset = no login screen),
+`DASHBOARD_TIMEZONE` (IANA name or `UTC±H`, default `UTC`) are optional. See
+`.env.local.example`. Vercel needs a **redeploy** after env var
 changes.
 
 Plugin config comes from `wp-config.php` constants, falling back to options, all

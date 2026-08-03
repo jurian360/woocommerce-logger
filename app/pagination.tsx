@@ -14,6 +14,9 @@ interface PaginationProps {
   days: number;
   sku: string;
   defaultDays: number;
+  /** Display zone, carried into every link so paging keeps it. */
+  timeZone: string;
+  defaultTimeZone: string;
 }
 
 const LINK =
@@ -34,12 +37,22 @@ export default function Pagination({
   days,
   sku,
   defaultDays,
+  timeZone,
+  defaultTimeZone,
 }: PaginationProps) {
   if (pages <= 1) {
     return null;
   }
 
-  const href = (target: number) => logQueryHref({ days, sku, page: target, defaultDays });
+  const href = (target: number) =>
+    logQueryHref({
+      days,
+      sku,
+      page: target,
+      defaultDays,
+      tz: timeZone,
+      defaultTz: defaultTimeZone,
+    });
 
   const first = (page - 1) * pageSize + 1;
   const last = Math.min(page * pageSize, total);

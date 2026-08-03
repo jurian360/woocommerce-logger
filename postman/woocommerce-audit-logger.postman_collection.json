@@ -382,8 +382,8 @@
               "    pm.expect(pm.response.text()).to.include('SHIRT-01');",
               "});",
               "",
-              "if (pm.response.code === 401) {",
-              "    console.log('401 → DASHBOARD_USER/DASHBOARD_PASSWORD are set. Add them under the Authorization tab (Basic Auth).');",
+              "if (pm.response.text().includes('Enter the dashboard password')) {",
+              "    console.log('Login screen → DASHBOARD_PASSWORD is set. Sign in with a browser and copy the wc_audit_session cookie into Postman for this domain.');",
               "}"
             ]
           }
@@ -396,7 +396,7 @@
           "raw": "{{baseUrl}}/",
           "host": ["{{baseUrl}}/"]
         },
-        "description": "Server-rendered HTML. Run this after request 02 to confirm the row was persisted and is rendered.\n\nIf DASHBOARD_USER and DASHBOARD_PASSWORD are set on the deployment, this returns 401 until you configure Basic Auth on the Authorization tab."
+        "description": "Server-rendered HTML. Run this after request 02 to confirm the row was persisted and is rendered.\n\nIf DASHBOARD_PASSWORD is set on the deployment, this redirects to /login until Postman holds a valid `wc_audit_session` cookie — sign in with a browser and copy it into the cookie jar for this domain."
       }
     },
     {
@@ -420,8 +420,8 @@
               "    pm.expect(pm.response.text()).to.include('SHIRT-01');",
               "});",
               "",
-              "if (pm.response.code === 401) {",
-              "    console.log('401 → DASHBOARD_USER/DASHBOARD_PASSWORD are set. Add them under the Authorization tab (Basic Auth).');",
+              "if (pm.response.text().includes('Enter the dashboard password')) {",
+              "    console.log('Login screen → DASHBOARD_PASSWORD is set. Sign in with a browser and copy the wc_audit_session cookie into Postman for this domain.');",
               "}"
             ]
           }
@@ -434,7 +434,7 @@
           "raw": "{{baseUrl}}/?days=7&sku=SHIRT-01",
           "host": ["{{baseUrl}}/?days=7&sku=SHIRT-01"]
         },
-        "description": "The dashboard narrowed to the last 7 days and searched by SKU. Run this after request 02, which logs a change for SHIRT-01.\n\n`days` is clamped to the retention window (14 by default), and `sku` is a case-insensitive substring match.\n\nReturns 401 while DASHBOARD_USER and DASHBOARD_PASSWORD are set — configure Basic Auth on the Authorization tab."
+        "description": "The dashboard narrowed to the last 7 days and searched by SKU. Run this after request 02, which logs a change for SHIRT-01.\n\n`days` is clamped to the retention window (14 by default), and `sku` is a case-insensitive substring match.\n\nRedirects to /login while DASHBOARD_PASSWORD is set — copy a signed-in browser's `wc_audit_session` cookie into Postman's cookie jar for this domain.\n\nAdd `&tz=UTC-3` to render the timestamps three hours behind UTC."
       }
     },
     {
