@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
-import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 
 import { dbConnect } from '@/lib/db';
+import { secretMatches } from '@/lib/secret';
 import AuditLog from '@/models/AuditLog';
 
 /** Mongoose needs the Node.js runtime — it cannot run on the Edge runtime. */
@@ -40,18 +40,6 @@ const PayloadSchema = z.object({
 
 function unauthorized(): NextResponse {
   return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 });
-}
-
-/** Constant-time comparison so the secret cannot be recovered by timing. */
-function secretMatches(provided: string, expected: string): boolean {
-  const a = Buffer.from(provided, 'utf8');
-  const b = Buffer.from(expected, 'utf8');
-
-  if (a.length !== b.length) {
-    return false;
-  }
-
-  return timingSafeEqual(a, b);
 }
 
 /** Accepts ISO-8601, unix seconds, or unix milliseconds. */

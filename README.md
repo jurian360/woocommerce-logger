@@ -21,9 +21,15 @@ WordPress / WooCommerce            Vercel                       MongoDB Atlas
 | `lib/db.ts` | Cached Mongoose connection (`global.mongoose` singleton) |
 | `models/AuditLog.ts` | `AuditLog` schema — indexed `product_id`, dynamic `changes` |
 | `app/api/logs/product-change/route.ts` | `POST` ingest endpoint, `X-Api-Secret` auth |
+| `app/api/logs/cleanup/route.ts` | Retention purge, run daily by the Vercel cron |
 | `app/page.tsx` | Dashboard listing the 50 most recent changes |
+| `app/filter-bar.tsx` | Day filter + SKU search above the table |
+| `lib/log-query.ts` | Retention window, filter parsing, Mongo query building |
 | `lib/format.ts` | Turns stored diffs into readable "from → to" lines |
+| `app/robots.ts` | `robots.txt` — disallows everything |
+| `app/icon.svg`, `app/favicon.ico` | Favicon (the SVG is the source; the `.ico` is a rasterised copy) |
 | `middleware.ts` | Optional HTTP Basic Auth for the dashboard |
+| `vercel.json` | Cron schedule for the retention purge |
 | `wordpress/wc-audit-logger.php` | The WordPress plugin that sends the events |
 
 ## 1. Set up MongoDB Atlas
@@ -93,14 +99,21 @@ Production (and Preview, if you use it):
 | --- | --- | --- |
 | `MONGODB_URI` | yes | Atlas connection string, including the database name |
 | `API_SECRET` | yes | Shared secret checked against `X-Api-Secret` |
+| `CRON_SECRET` | no* | Authenticates the daily retention cron; without it the purge returns `401` |
 | `MONGODB_DB` | no | Overrides the database name from the URI |
+| `LOG_RETENTION_DAYS` | no | How long entries are kept (default `14`) |
 | `DASHBOARD_USER` | no | Enables Basic Auth on the dashboard when set with the password |
 | `DASHBOARD_PASSWORD` | no | See above |
 | `DASHBOARD_TIMEZONE` | no | IANA zone for rendering timestamps (default `UTC`) |
 
+\* Optional only if you do not want automatic pruning. Vercel attaches
+`Authorization: Bearer $CRON_SECRET` to cron invocations, and only when the
+variable exists — see [Retention](#retention).
+
 > The dashboard shows who changed what and when. Unless you set
 > `DASHBOARD_USER` **and** `DASHBOARD_PASSWORD`, anyone with the URL can read it.
-> The page also sends `noindex`, but that is not access control.
+> The page also sends `noindex` and `robots.txt` disallows every crawler, but
+> neither is access control.
 
 ## 4. Install the WordPress plugin
 
@@ -191,6 +204,71 @@ delivery is confirmed, and failures are written to the WooCommerce log.
 | `wc_audit_logger_endpoint` | filter | Endpoint URL |
 | `wc_audit_logger_secret` | filter | Shared secret |
 | `wc_audit_logger_sslverify` | filter | Set `false` only for local self-signed certs |
+
+## Using the dashboard
+
+The table shows the 50 most recent changes inside the selected window, newest
+first. Two filters sit above it, and both live in the URL, so a filtered view can
+be bookmarked or shared:
+
+| Control | Query parameter | Behaviour |
+| --- | --- | --- |
+| Period | `?days=` | `1`, `3`, `7` or `14`. Clamped to the retention window; anything missing or invalid falls back to the full window |
+| SKU | `?sku=` | Case-insensitive substring match, so `shirt` finds `SHIRT-01`. Regex characters are escaped and searched literally |
+
+```
+/                          the full retention window
+/?days=1                   the last 24 hours
+/?sku=SHIRT-01             one SKU, full window
+/?days=7&sku=shirt         combined
+```
+
+The default view (`/`) carries no parameters. `days` above the retention window
+is silently clamped — there is no data behind it.
+
+## Retention
+
+**Entries are kept for 14 days.** Anything older is deleted.
+
+Two things enforce this:
+
+1. **Every dashboard query is bounded** by the retention window, so an entry past
+   its window is never rendered, even in the hours before it is deleted.
+2. **A daily cron** (`vercel.json`, 03:17 UTC) calls
+   `GET /api/logs/cleanup`, which deletes everything older than the window.
+
+Change the window with `LOG_RETENTION_DAYS` — it drives the purge, the filter
+buttons and the query bound together. Vercel needs a redeploy after changing it.
+
+### Enabling the cron
+
+Set `CRON_SECRET` in **Settings → Environment Variables** and redeploy. Vercel
+adds `Authorization: Bearer $CRON_SECRET` to scheduled requests only when that
+variable exists; without it the purge answers `401` and nothing is ever deleted.
+
+Check that it works — the endpoint counts without deleting when `dry=1`:
+
+```bash
+curl -H "X-Api-Secret: $API_SECRET" \
+  "https://your-app.vercel.app/api/logs/cleanup?dry=1"
+# {"success":true,"dry_run":true,"retention_days":14,"cutoff":"...","deleted":3}
+```
+
+Drop `?dry=1` to purge immediately. Each run writes its outcome to the Vercel
+function log, and **Settings → Cron Jobs** shows the last invocation.
+
+### Belt and braces: a TTL index
+
+The cron is enough on its own. If you would rather not depend on it, let MongoDB
+expire documents itself — Atlas checks TTL indexes about once a minute:
+
+```js
+db.audit_logs.createIndex({ timestamp: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 14 })
+```
+
+Keep the number in sync with `LOG_RETENTION_DAYS`. To change it later, drop the
+index and create it again; MongoDB rejects a second index on the same key with
+different options.
 
 ## Testing with Postman
 
@@ -294,6 +372,18 @@ here, and the dashboard will render them.
 
 Connectivity probe. Same header, returns `{ "success": true, "ready": true }`.
 
+### `GET|POST /api/logs/cleanup`
+
+Deletes every entry older than the retention window. Accepts either
+`X-Api-Secret: <API_SECRET>` or `Authorization: Bearer <CRON_SECRET>` — the
+latter is what the Vercel cron sends. `?dry=1` counts instead of deleting.
+
+| Status | Meaning |
+| --- | --- |
+| `200` | `{ "success": true, "dry_run": false, "retention_days": 14, "cutoff": "...", "deleted": 3 }` |
+| `401` | Neither secret matched |
+| `500` | No secret configured on the deployment, or the delete failed |
+
 ## Design notes
 
 **Connection pooling.** Each Vercel container caches one Mongoose connection —
@@ -314,12 +404,15 @@ the persisted values and `get_changes()` the pending ones — stashes it keyed b
 `spl_object_id()`, and sends it from the `after` hook, once the save has
 succeeded and a newly created product has a real ID.
 
-**Retention.** Nothing is pruned automatically. To expire old entries, add a TTL
-index in Atlas:
+**Retention is enforced twice.** The purge is a scheduled job, and a scheduled
+job that quietly stops running is invisible — so the dashboard applies the same
+cutoff to every query rather than trusting that the deletion happened. The two
+derive their numbers from one place (`lib/log-query.ts`), which is also why the
+day filter can never ask for a window wider than what is retained.
 
-```js
-db.audit_logs.createIndex({ timestamp: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 365 })
-```
+**The purge is not fire-and-forget.** It answers with the cutoff it used and the
+number of rows it removed, logs the same line to the function log, and supports
+`?dry=1` for checking it before trusting it. See [Retention](#retention).
 
 ## Scripts
 
@@ -327,6 +420,7 @@ db.audit_logs.createIndex({ timestamp: 1 }, { expireAfterSeconds: 60 * 60 * 24 *
 npm run dev        # local dev server
 npm run build      # production build
 npm run start      # serve the production build
+npm test           # TS + PHP harnesses
 npm run lint       # eslint
 npm run typecheck  # tsc --noEmit
 ```

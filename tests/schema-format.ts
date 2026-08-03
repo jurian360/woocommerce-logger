@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict';
 import AuditLog from '../models/AuditLog.ts';
 import { summarizeChanges, formatTimestamp } from '../lib/format.ts';
+import {
+  DEFAULT_RETENTION_DAYS,
+  MS_PER_DAY,
+  cutoffFor,
+  dayFilterOptions,
+  parseDays,
+  parseLogQuery,
+  parseSku,
+  resolveRetentionDays,
+  windowLabel,
+} from '../lib/log-query.ts';
 
 let passed = 0;
 function ok(label: string, fn: () => void) {
@@ -49,7 +60,84 @@ const indexes = AuditLog.schema.indexes().map(([spec]) => JSON.stringify(spec));
 ok('timestamp index exists', () => assert.ok(indexes.includes('{"timestamp":-1}')));
 ok('product+timestamp index exists', () =>
   assert.ok(indexes.includes('{"product_id":1,"timestamp":-1}')));
+ok('sku+timestamp index exists', () =>
+  assert.ok(indexes.includes('{"sku":1,"timestamp":-1}')));
 ok('collection name', () => assert.equal(AuditLog.collection.collectionName, 'audit_logs'));
+
+/* ---------- Retention + dashboard filters ---------------------------------- */
+
+ok('retention defaults to 14 days', () => {
+  assert.equal(DEFAULT_RETENTION_DAYS, 14);
+  assert.equal(resolveRetentionDays(undefined), 14);
+  assert.equal(resolveRetentionDays(''), 14);
+  assert.equal(resolveRetentionDays('not-a-number'), 14);
+});
+ok('retention accepts an override', () => {
+  assert.equal(resolveRetentionDays('30'), 30);
+  assert.equal(resolveRetentionDays(7), 7);
+  assert.equal(resolveRetentionDays('7.9'), 7);
+});
+ok('retention is clamped', () => {
+  assert.equal(resolveRetentionDays('0'), 1);
+  assert.equal(resolveRetentionDays('-5'), 1);
+  assert.equal(resolveRetentionDays('99999'), 3650);
+});
+
+const now = new Date('2026-08-03T10:00:00.000Z');
+
+ok('cutoff is N days back', () =>
+  assert.equal(cutoffFor(14, now).toISOString(), '2026-07-20T10:00:00.000Z'));
+ok('a day is 86_400_000 ms', () => assert.equal(MS_PER_DAY, 86_400_000));
+
+ok('day options stop at the retention window', () => {
+  assert.deepEqual(dayFilterOptions(14), [1, 3, 7, 14]);
+  assert.deepEqual(dayFilterOptions(30), [1, 3, 7, 14, 30]);
+  assert.deepEqual(dayFilterOptions(1), [1]);
+});
+ok('window labels read naturally', () => {
+  assert.equal(windowLabel(1), '24 hours');
+  assert.equal(windowLabel(14), '14 days');
+});
+
+ok('days defaults to the full window', () => {
+  assert.equal(parseDays(undefined, 14), 14);
+  assert.equal(parseDays('', 14), 14);
+  assert.equal(parseDays('nonsense', 14), 14);
+  assert.equal(parseDays('0', 14), 14);
+});
+ok('days never exceeds retention', () => assert.equal(parseDays('365', 14), 14));
+ok('days accepts a narrower window', () => assert.equal(parseDays('7', 14), 7));
+ok('days takes the first repeated param', () =>
+  assert.equal(parseDays(['3', '7'], 14), 3));
+
+ok('sku is trimmed and capped', () => {
+  assert.equal(parseSku('  SHIRT-01 '), 'SHIRT-01');
+  assert.equal(parseSku(undefined), '');
+  assert.equal(parseSku('x'.repeat(500)).length, 200);
+});
+
+ok('filter always bounds by the retention window', () => {
+  const { filter, isFiltered } = parseLogQuery({ max: 14, now });
+  assert.deepEqual(filter, { timestamp: { $gte: new Date('2026-07-20T10:00:00.000Z') } });
+  assert.equal(isFiltered, false);
+});
+ok('filter narrows to the requested days', () => {
+  const { filter, days, isFiltered } = parseLogQuery({ days: '1', max: 14, now });
+  assert.equal(days, 1);
+  assert.equal(isFiltered, true);
+  assert.deepEqual(filter.timestamp, { $gte: new Date('2026-08-02T10:00:00.000Z') });
+});
+ok('filter searches SKU case-insensitively', () => {
+  const { filter, sku } = parseLogQuery({ sku: ' shirt ', max: 14, now });
+  assert.equal(sku, 'shirt');
+  assert.deepEqual(filter.sku, { $regex: 'shirt', $options: 'i' });
+});
+ok('filter escapes regex metacharacters in a SKU', () => {
+  const { filter } = parseLogQuery({ sku: 'A+B (2).x', max: 14, now });
+  assert.deepEqual(filter.sku, { $regex: 'A\\+B \\(2\\)\\.x', $options: 'i' });
+});
+ok('filter omits sku when not searching', () =>
+  assert.equal(parseLogQuery({ max: 14, now }).filter.sku, undefined));
 
 /* ---------- Dashboard formatting ------------------------------------------ */
 
