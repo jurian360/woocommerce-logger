@@ -140,6 +140,47 @@ Tracked properties, grouped as they appear in `changes`:
 Each entry is a `{ from, to }` pair. Cosmetic-only price edits (`19.9` → `19.90`)
 are ignored.
 
+### Troubleshooting: nothing is arriving
+
+Go to **WooCommerce → Audit Logger**. That screen shows the resolved endpoint
+and secret, whether an event has ever been sent, and two buttons that make a
+*blocking* request so you see the real HTTP status code.
+
+The decisive field is **Last send attempt**:
+
+- **Still "never"** after you edit a product price → the request never got as far
+  as being sent. The change was not a tracked field, or the save was not made by
+  a logged-in user with `edit_products`. Set `WC_AUDIT_LOGGER_DEBUG` to `true`
+  and check **WooCommerce → Status → Logs**; every skipped save records why.
+- **Populated, but nothing on the dashboard** → the event left WordPress and did
+  not land. Press **Test connection** and read the code:
+
+| Result | Cause |
+| --- | --- |
+| `200` | Endpoint and secret are correct — the problem is downstream (see the `500` row) |
+| `401` | The secret does not match `API_SECRET` on the server |
+| `404` | Wrong URL; it must end in `/api/logs/product-change` |
+| `500` | `API_SECRET` missing on the server, or the MongoDB write failed |
+| `3xx` | Unfollowed redirect — trailing slash, or a www/non-www mismatch |
+| Timeout / connection error | The host blocks outbound HTTP requests |
+
+If **Test connection** returns `200` but real product edits still never arrive,
+your host is likely dropping non-blocking requests. Set:
+
+```php
+define( 'WC_AUDIT_LOGGER_BLOCKING', true );
+```
+
+Product saves then wait for the audit API (a few hundred milliseconds) but
+delivery is confirmed, and failures are written to the WooCommerce log.
+
+### Optional constants
+
+| Constant | Effect |
+| --- | --- |
+| `WC_AUDIT_LOGGER_DEBUG` | Logs every skipped save and every HTTP response to WooCommerce → Status → Logs. Implies blocking mode |
+| `WC_AUDIT_LOGGER_BLOCKING` | Wait for the response on every send, so failures are visible |
+
 ### Hooks
 
 | Hook | Type | Purpose |
