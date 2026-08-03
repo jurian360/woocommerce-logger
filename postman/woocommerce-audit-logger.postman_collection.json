@@ -1,0 +1,398 @@
+{
+  "info": {
+    "name": "WooCommerce Audit Logger",
+    "description": "Tests the audit-log ingest endpoint and dashboard.\n\nSetup: import the companion environment file, set `baseUrl` to your deployment (e.g. https://woocommerce-logger.vercel.app) and `apiSecret` to the same value as the API_SECRET environment variable in Vercel.\n\nRun the whole collection with the Collection Runner: requests 01-03 exercise the happy paths, 04-08 assert that bad requests are rejected.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "logPath",
+      "value": "/api/logs/product-change",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "01 · Health probe (GET)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK — endpoint reachable and secret accepted', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('reports ready', function () {",
+              "    const body = pm.response.json();",
+              "    pm.expect(body.success).to.eql(true);",
+              "    pm.expect(body.ready).to.eql(true);",
+              "});",
+              "",
+              "if (pm.response.code === 401) {",
+              "    console.log('401 → apiSecret does not match API_SECRET in Vercel.');",
+              "}",
+              "if (pm.response.code === 500) {",
+              "    console.log('500 → API_SECRET is not set on the deployment at all.');",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Api-Secret",
+            "value": "{{apiSecret}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}{{logPath}}",
+          "host": ["{{baseUrl}}{{logPath}}"]
+        },
+        "description": "Cheapest possible check: confirms the route exists and the secret matches. Does not touch MongoDB."
+      }
+    },
+    {
+      "name": "02 · Log product change (POST)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('202 Accepted', function () {",
+              "    pm.response.to.have.status(202);",
+              "});",
+              "",
+              "pm.test('returns the inserted id', function () {",
+              "    const body = pm.response.json();",
+              "    pm.expect(body.success).to.eql(true);",
+              "    pm.expect(body.id).to.be.a('string').and.to.have.lengthOf(24);",
+              "    pm.collectionVariables.set('lastInsertedId', body.id);",
+              "});",
+              "",
+              "pm.test('responds quickly', function () {",
+              "    pm.expect(pm.response.responseTime).to.be.below(5000);",
+              "});",
+              "",
+              "if (pm.response.code === 500) {",
+              "    console.log('500 → MongoDB write failed. Check MONGODB_URI and that Atlas Network Access allows 0.0.0.0/0.');",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Api-Secret",
+            "value": "{{apiSecret}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"product_id\": 123,\n  \"parent_id\": 0,\n  \"sku\": \"SHIRT-01\",\n  \"name\": \"Blue Shirt\",\n  \"currency\": \"EUR\",\n  \"site\": \"https://shop.example.com\",\n  \"source\": \"admin\",\n  \"permalink\": \"https://shop.example.com/product/blue-shirt\",\n  \"edit_link\": \"https://shop.example.com/wp-admin/post.php?post=123&action=edit\",\n  \"is_new\": false,\n  \"admin\": {\n    \"id\": 1,\n    \"user\": \"jurian\",\n    \"email\": \"jurian@example.com\",\n    \"roles\": [\"administrator\"]\n  },\n  \"timestamp\": \"{{$isoTimestamp}}\",\n  \"changes\": {\n    \"price\": {\n      \"regular_price\": { \"from\": \"19.99\", \"to\": \"24.99\" },\n      \"sale_price\": { \"from\": \"\", \"to\": \"20.00\" }\n    },\n    \"stock\": {\n      \"stock_quantity\": { \"from\": 10, \"to\": 4 },\n      \"stock_status\": { \"from\": \"instock\", \"to\": \"outofstock\" }\n    },\n    \"status\": { \"from\": \"draft\", \"to\": \"publish\" },\n    \"catalog_visibility\": { \"from\": \"visible\", \"to\": \"hidden\" }\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}{{logPath}}",
+          "host": ["{{baseUrl}}{{logPath}}"]
+        },
+        "description": "A complete payload, identical in shape to what the WordPress plugin sends. After a 202, this row should appear at the top of the dashboard."
+      }
+    },
+    {
+      "name": "03 · Minimal payload (POST)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('202 Accepted — only product_id is required', function () {",
+              "    pm.response.to.have.status(202);",
+              "    pm.expect(pm.response.json().success).to.eql(true);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Api-Secret",
+            "value": "{{apiSecret}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"product_id\": 456,\n  \"changes\": {\n    \"status\": { \"from\": \"publish\", \"to\": \"draft\" },\n    \"weight\": { \"from\": \"1.0\", \"to\": \"2.5\" }\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}{{logPath}}",
+          "host": ["{{baseUrl}}{{logPath}}"]
+        },
+        "description": "Everything except product_id is optional. `weight` is not declared in the schema — it is stored and rendered anyway, because the changes sub-document is non-strict."
+      }
+    },
+    {
+      "name": "04 · Missing secret → 401",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('401 Unauthorized', function () {",
+              "    pm.response.to.have.status(401);",
+              "    pm.expect(pm.response.json().success).to.eql(false);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"product_id\": 123,\n  \"changes\": { \"status\": { \"from\": \"draft\", \"to\": \"publish\" } }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}{{logPath}}",
+          "host": ["{{baseUrl}}{{logPath}}"]
+        },
+        "description": "No X-Api-Secret header at all. Must be rejected before anything is written."
+      }
+    },
+    {
+      "name": "05 · Wrong secret → 401",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('401 Unauthorized', function () {",
+              "    pm.response.to.have.status(401);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Api-Secret",
+            "value": "definitely-not-the-secret"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"product_id\": 123,\n  \"changes\": { \"status\": { \"from\": \"draft\", \"to\": \"publish\" } }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}{{logPath}}",
+          "host": ["{{baseUrl}}{{logPath}}"]
+        }
+      }
+    },
+    {
+      "name": "06 · Malformed JSON → 400",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('400 Bad Request', function () {",
+              "    pm.response.to.have.status(400);",
+              "    pm.expect(pm.response.json().error).to.eql('Invalid JSON body');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Api-Secret",
+            "value": "{{apiSecret}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{ this is not json",
+          "options": {
+            "raw": {
+              "language": "text"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}{{logPath}}",
+          "host": ["{{baseUrl}}{{logPath}}"]
+        }
+      }
+    },
+    {
+      "name": "07 · Missing product_id → 400",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('400 Bad Request', function () {",
+              "    pm.response.to.have.status(400);",
+              "});",
+              "",
+              "pm.test('names the offending field', function () {",
+              "    const body = pm.response.json();",
+              "    pm.expect(body.error).to.eql('Invalid payload');",
+              "    pm.expect(body.issues.map(function (i) { return i.path; })).to.include('product_id');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Api-Secret",
+            "value": "{{apiSecret}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"sku\": \"SHIRT-01\",\n  \"changes\": { \"status\": { \"from\": \"draft\", \"to\": \"publish\" } }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}{{logPath}}",
+          "host": ["{{baseUrl}}{{logPath}}"]
+        }
+      }
+    },
+    {
+      "name": "08 · Wrong method (PUT) → 405",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('405 Method Not Allowed', function () {",
+              "    pm.response.to.have.status(405);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "X-Api-Secret",
+            "value": "{{apiSecret}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}{{logPath}}",
+          "host": ["{{baseUrl}}{{logPath}}"]
+        },
+        "description": "Only GET and POST are implemented; Next.js answers everything else with 405."
+      }
+    },
+    {
+      "name": "09 · Dashboard (GET /)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('renders the dashboard', function () {",
+              "    pm.response.to.have.status(200);",
+              "    pm.expect(pm.response.text()).to.include('WooCommerce Audit Log');",
+              "});",
+              "",
+              "pm.test('shows the row logged by request 02', function () {",
+              "    pm.expect(pm.response.text()).to.include('SHIRT-01');",
+              "});",
+              "",
+              "if (pm.response.code === 401) {",
+              "    console.log('401 → DASHBOARD_USER/DASHBOARD_PASSWORD are set. Add them under the Authorization tab (Basic Auth).');",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/",
+          "host": ["{{baseUrl}}/"]
+        },
+        "description": "Server-rendered HTML. Run this after request 02 to confirm the row was persisted and is rendered.\n\nIf DASHBOARD_USER and DASHBOARD_PASSWORD are set on the deployment, this returns 401 until you configure Basic Auth on the Authorization tab."
+      }
+    }
+  ]
+}

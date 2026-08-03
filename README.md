@@ -151,6 +151,85 @@ are ignored.
 | `wc_audit_logger_secret` | filter | Shared secret |
 | `wc_audit_logger_sslverify` | filter | Set `false` only for local self-signed certs |
 
+## Testing with Postman
+
+Import both files from `postman/`:
+
+- `woocommerce-audit-logger.postman_collection.json`
+- `woocommerce-audit-logger.postman_environment.json`
+
+Select the environment, set `apiSecret` to the same value as `API_SECRET` in
+Vercel, and adjust `baseUrl` if your deployment URL differs. Then **Run
+collection** — requests 01–03 cover the happy paths and 04–08 assert that bad
+requests are rejected.
+
+Run it headlessly with [Newman](https://github.com/postmanlabs/newman):
+
+```bash
+npx newman run postman/woocommerce-audit-logger.postman_collection.json \
+  --env-var baseUrl=https://your-app.vercel.app \
+  --env-var apiSecret=$API_SECRET
+```
+
+### Doing it by hand
+
+Start with the health probe — it needs no database, so it isolates
+"is the endpoint reachable and is my secret right?" from everything else:
+
+| | |
+| --- | --- |
+| Method | `GET` |
+| URL | `https://your-app.vercel.app/api/logs/product-change` |
+| Header | `X-Api-Secret: <your secret>` |
+
+Expect `200` and `{"success":true,"ready":true}`.
+
+Then log a change:
+
+| | |
+| --- | --- |
+| Method | `POST` |
+| URL | `https://your-app.vercel.app/api/logs/product-change` |
+| Headers | `X-Api-Secret: <your secret>`, `Content-Type: application/json` |
+| Body | **raw → JSON**, see below |
+
+```json
+{
+  "product_id": 123,
+  "sku": "SHIRT-01",
+  "name": "Blue Shirt",
+  "currency": "EUR",
+  "admin": { "id": 1, "user": "jurian", "email": "jurian@example.com" },
+  "timestamp": "2026-08-03T10:00:00Z",
+  "changes": {
+    "price": { "regular_price": { "from": "19.99", "to": "24.99" } },
+    "stock": { "stock_quantity": { "from": 10, "to": 4 } },
+    "status": { "from": "draft", "to": "publish" },
+    "catalog_visibility": { "from": "visible", "to": "hidden" }
+  }
+}
+```
+
+Expect `202` and `{"success":true,"id":"..."}`, then open the dashboard — the
+row should be at the top.
+
+### Reading the response
+
+| Status | Meaning | Fix |
+| --- | --- | --- |
+| `202` | Stored | — |
+| `400` | Malformed JSON, or validation failed | Check the `issues` array in the response; make sure Postman's body is **raw → JSON**, not form-data |
+| `401` | Secret missing or wrong | The header is `X-Api-Secret`; confirm it matches `API_SECRET` in Vercel exactly, with no trailing whitespace or newline |
+| `404` | Wrong path | It is `/api/logs/product-change`, no trailing slash |
+| `405` | Wrong method | Only `GET` and `POST` exist |
+| `413` | Body over 64 KB | Send less |
+| `500` on `GET` | `API_SECRET` is not set on the deployment | Add it in Vercel, then redeploy — env var changes need a new deployment |
+| `500` on `POST` | The MongoDB write failed | Check `MONGODB_URI`, and that Atlas **Network Access** allows `0.0.0.0/0`; Vercel's egress IPs are dynamic |
+
+A `401` on the **dashboard** rather than the API means `DASHBOARD_USER` and
+`DASHBOARD_PASSWORD` are set. Add them under Postman's **Authorization** tab as
+Basic Auth.
+
 ## API
 
 ### `POST /api/logs/product-change`
